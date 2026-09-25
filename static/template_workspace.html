@@ -44,11 +44,10 @@
   .p-serial { font-family: var(--font-mono); font-size: 12px; color: var(--accent); font-weight: 700; }
   .p-name   { font-size: 11px; color: var(--text-dim); margin-top: 1px; }
   .p-hint   { font-size: 10px; color: var(--accent2); margin-top: 1px; }
-  .del-btn  { margin-left: auto; width: 20px; height: 20px; border: none; background: transparent;
-              color: var(--text-dim); cursor: pointer; font-size: 14px; border-radius: 3px;
-              display: none; align-items: center; justify-content: center; flex-shrink: 0; }
-  .product-item:hover .del-btn { display: flex; }
-  .del-btn:hover { background: var(--danger); color: #fff; }
+  .del-btn  { margin-left: auto; padding: 4px 7px; border: 1px solid var(--border); background: transparent;
+              color: var(--text-dim); cursor: pointer; font-size: 11px; border-radius: 4px;
+              flex-shrink: 0; }
+  .del-btn:hover, .del-btn:focus-visible { background: var(--danger); color: #fff; }
 
   .content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 
@@ -171,7 +170,7 @@
   ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 </style>
-<link rel="stylesheet" href="/static/workspace.css?v=2.4.7"><link rel="stylesheet" href="/static/primary_nav.css?v=2.4.7"></head>
+<link rel="stylesheet" href="/static/workspace.css?v=2.4.5"><link rel="stylesheet" href="/static/primary_nav.css?v=2.4.5"><link rel="stylesheet" href="/static/notice.css?v=1"></head>
 <body class="workspace">
 <div id="app">
 
@@ -201,7 +200,7 @@
       <div style="width:1px;height:20px;background:var(--border);margin:0 4px;"></div>
 
       <div id="editControls" style="display:none;align-items:center;gap:8px;flex-wrap:wrap;">
-<button class="btn primary" id="captureEdgeBtn" onclick="workspaceCapture()">從相機擷取</button>        <label class="btn">
+<button class="btn primary" id="captureEdgeBtn" onclick="workspaceCapture()">從相機擷取</button><button class="btn" onclick="workspaceCameraOpen()">相機取像設定</button>        <label class="btn">
           載入圖片／影片
           <input type="file" id="mediaInput" accept="video/*,image/*" onchange="onMediaPicked(event)" style="display:none">
         </label>
@@ -423,7 +422,7 @@
 </div>
 
 <!-- Hidden video element for frame capture -->
-<script src="/static/visionedge_i18n.js?v=2.4.7"></script><script>
+<script src="/static/visionedge_i18n.js?v=2.4.8"></script><script src="/static/notice.js?v=2"></script><script>
 // ══════════════════════════════════════════════════════════════
 // Design principle:
 //  state.regions x/y/w/h are always original pixel coords
@@ -445,6 +444,8 @@ const S = {           // state
   // coords = original pixels, no scale
   regions: [],
   scale: 1,
+  imageWidth: 0,
+  imageHeight: 0,
   imgLoaded: false,
   srcB64: null,          // original-resolution b64, used for template crop on save
   // Pinned captures: lets one labeling session safely hold boxes drawn on more than
@@ -601,8 +602,14 @@ function renderProductList() {
         <div class="p-name" data-i18n-skip>${esc(p.name||'—')}</div>
         ${p.has_ref_img ? '<div class="p-hint">已有取樣畫面</div>' : ''}
       </div>
-      <button class="btn sm" onclick="delProduct(event,${p.id})" aria-label="刪除產品">刪除</button>
       `;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'del-btn';
+    remove.textContent = '刪除';
+    remove.setAttribute('aria-label', `刪除產品 ${p.serial}`);
+    remove.addEventListener('click', e => delProduct(e, p));
+    d.appendChild(remove);
     d.addEventListener('click', ()=>selectProduct(p));
     el.appendChild(d);
   });
@@ -629,15 +636,37 @@ async function submitAdd() {
   closeModal();
   await loadProducts();
   const found = S.products.find(p=>p.id===d.id);
-  if (found) selectProduct(found);
+  if (found) { await selectProduct(found); if (S.selectedPid === found.id) toast(`已新增產品 ${found.serial}`); }
 }
 
-async function delProduct(e, pid) {
+async function delProduct(e, product) {
   e.stopPropagation();
-  if (!confirm('Delete this product and all its regions?')) return;
-  await fetch(`${API}/api/products/${pid}`, {method:'DELETE'});
-  if (S.selectedPid===pid) resetAll();
-  await loadProducts();
+  if (workspaceBusy) return;
+  if (workspacePending() && !await workspaceConfirm('尚有未儲存的修改，確定離開？')) return;
+  const confirmed = await workspaceConfirm(`永久刪除產品「${product.serial}」及其樣板與流程？其他產品已匯入的樣板副本會保留。`);
+  if (!confirmed) return;
+  workspaceLock(true);
+  let next = null;
+  try {
+    await studioRequest(`${API}/api/products/${product.id}`, {method:'DELETE'});
+    if (S.selectedPid === product.id) {
+      resetAll();
+      S.selectedPid = null;
+      S.editMode = false;
+      workspaceSaved = null;
+      workspaceVersion = '';
+      workspaceBaseline = '';
+      next = S.products.find(p => p.id !== product.id) || null;
+    }
+    await loadProducts();
+    applyEditModeUI();
+    toast(`已刪除產品 ${product.serial}`);
+  } catch (err) {
+    toast(`刪除失敗：${err.message}`, 'error');
+  } finally {
+    workspaceLock(false);
+  }
+  if (next) await selectProduct(next);
 }
 
 // ──────────────────────────────────────────────
@@ -791,7 +820,7 @@ async function saveVisionConfig() {
     updateVisionUI();
     msg.style.color = 'var(--accent2)';
     msg.textContent = '已套用。請重新擷取參考圖並重新標註 ROI/template。';
-    setStatus('Vision config updated. Re-capture reference image before production inspection.');
+    toast('Vision config updated. Re-capture reference image before production inspection.');
     setTimeout(closeVisionPanel, 600);
   } catch (e) {
     msg.style.color = 'var(--danger)';
@@ -856,6 +885,8 @@ function displayImg(b64) {
       if(labelSource!==b64){labelScale=null;labelPan=false;}
       labelImage=img;labelSource=b64;
       S.imgLoaded = true;
+      S.imageWidth = img.width;
+      S.imageHeight = img.height;
       document.getElementById('canvasCtr').style.display = 'inline-block';
       document.getElementById('noImgMsg').style.display = 'none';
       labelRender();
@@ -1156,7 +1187,7 @@ async function _fetchServerLabelFrame(timeSec, capture=false) {
     await displayImg(b64);
     document.getElementById('videoSeek').value = target;
     _updateLblTimecode();
-    if (capture) setStatus(`Frame captured @ ${fmt(target)}  (server compatibility mode)`);
+    if (capture) toast(`Frame captured @ ${fmt(target)}  (server compatibility mode)`);
     return true;
   } catch (err) {
     setStatus(`Server frame read failed: ${err?.message || err}`);
@@ -1216,6 +1247,8 @@ function _layoutLabelVideo() {
   const maxW = Math.max(1, wrap.clientWidth - 24);
   const maxH = Math.max(1, wrap.clientHeight - 24);
   S.scale = Math.min(1, maxW / LV.videoWidth, maxH / LV.videoHeight);
+  S.imageWidth = LV.videoWidth;
+  S.imageHeight = LV.videoHeight;
   const dW = Math.max(1, Math.round(LV.videoWidth * S.scale));
   const dH = Math.max(1, Math.round(LV.videoHeight * S.scale));
   LV.style.width = dW + 'px';
@@ -1333,7 +1366,7 @@ function _captureToCanvas() {
   const capturedAt = LV.currentTime;
   const ztxt = S.vision.digital_zoom_enabled ? `  Zoom ${S.vision.digital_zoom}x` : '';
   displayImg(b64).then(() => {
-    setStatus(`Frame captured @ ${fmt(capturedAt)}  (${vw}×${vh})${ztxt}`);
+    toast(`Frame captured @ ${fmt(capturedAt)}  (${vw}×${vh})${ztxt}`);
   });
   return true;
 }
@@ -1522,7 +1555,7 @@ async function assignRegionToStep(regionId) {
     const d = await r.json();
     if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
     _stepsCache = null;
-    setStatus(`✅ Added to Step "${d.step.name}" as ${role} sample. Open the SOP Designer to fine-tune ordering/timing.`);
+    toast(`✅ Added to Step "${d.step.name}" as ${role} sample. Open the SOP Designer to fine-tune ordering/timing.`);
   } catch (e) {
     alert('Assign failed: ' + (e.message || e));
   }
@@ -1576,6 +1609,7 @@ function drawEnd(e) {
   // at save time.
   const region = {
     label, sample_hint:hint, x, y, w, h, threshold:thr, search_margin:0, _sel:false,
+    source_width:S.imageWidth, source_height:S.imageHeight,
     _srcB64: srcB64,
     _captureId: captureId,
     _videoTimeLabel: currentVideoTimeLabel(),
@@ -1612,23 +1646,25 @@ function drawOverlay() {
   const placedLabels = []; // already-placed label rects, so a cluster of boxes doesn't
                             // end up with every label text stacked illegibly in one spot
   visible.forEach((r,i)=>{
-    const cx=r.x*S.scale, cy=r.y*S.scale, cw=r.w*S.scale, ch=r.h*S.scale;
-    const mg=(r.search_margin||0)*S.scale;
+    const sx=(Number(r.source_width)>0 && S.imageWidth>0)?S.imageWidth/Number(r.source_width):1;
+    const sy=(Number(r.source_height)>0 && S.imageHeight>0)?S.imageHeight/Number(r.source_height):1;
+    const cx=r.x*sx*S.scale, cy=r.y*sy*S.scale, cw=r.w*sx*S.scale, ch=r.h*sy*S.scale;
+    const mgx=(r.search_margin||0)*sx*S.scale, mgy=(r.search_margin||0)*sy*S.scale;
     const sel=r._sel;
     const hint=cleanSampleHint(r.sample_hint);
     const clr=sel?'#f0a500':(hint==='NG'?'#f85149':(hint==='NEUTRAL'?'#8b949e':(S.editMode?'#58a6ff':'#3fb950')));
 
     // Search margin dashed box
-    if (mg>0) {
+    if (mgx>0 || mgy>0) {
       Octx.save();
       Octx.strokeStyle='rgba(180,180,60,.75)'; Octx.lineWidth=1;
       Octx.setLineDash([4,3]);
-      Octx.strokeRect(cx-mg+.5, cy-mg+.5, cw+mg*2, ch+mg*2);
+      Octx.strokeRect(cx-mgx+.5, cy-mgy+.5, cw+mgx*2, ch+mgy*2);
       Octx.setLineDash([]);
       Octx.fillStyle='rgba(180,180,60,.05)';
-      Octx.fillRect(cx-mg+.5, cy-mg+.5, cw+mg*2, ch+mg*2);
+      Octx.fillRect(cx-mgx+.5, cy-mgy+.5, cw+mgx*2, ch+mgy*2);
       Octx.font='bold 10px monospace'; Octx.fillStyle='rgba(180,180,60,.9)';
-      Octx.fillText(`±${r.search_margin}px`, cx-mg+3, cy-mg+11);
+      Octx.fillText(`±${r.search_margin}px`, cx-mgx+3, cy-mgy+11);
       Octx.restore();
     }
     // ROI box
@@ -1819,7 +1855,7 @@ async function _uploadInferVideo(file) {
     document.getElementById('inferNoMsg').style.display='none';
 
     await _previewServerFrame(0);
-    setStatus(`Video uploaded: ${file.name}  ${d.width}×${d.height}  ${d.fps.toFixed(1)}fps  ${fmt(d.duration)}`);
+    toast(`Video uploaded: ${file.name}  ${d.width}×${d.height}  ${d.fps.toFixed(1)}fps  ${fmt(d.duration)}`);
   } catch(err) {
     alert('Video upload failed: '+err.message);
   } finally {
@@ -1937,7 +1973,7 @@ function _startStream(startTime) {
     }
     if (d.type==='done') {
       stopStream();
-      setStatus('Inference complete');
+      toast('Inference complete');
       return;
     }
     if (d.type==='frame') {
@@ -2046,7 +2082,7 @@ async function loadLogs() {
 // ──────────────────────────────────────────────
 function resetAll() {
   S.clearTemplate=false;labelImage=null;labelSource=null;labelScale=null;labelPan=false;labelDrag=null;S.drawing=false;S.drawCur=null;
-  S.regions=[]; S.imgLoaded=false; S.scale=1; S.lblVideoReady=false; S.srcB64=null;
+  S.regions=[]; S.imgLoaded=false; S.scale=1; S.imageWidth=0; S.imageHeight=0; S.lblVideoReady=false; S.srcB64=null;
   S.captures=[]; S.activeCaptureId=null; S.activeCaptureB64=null;
   const backBtn = document.getElementById('backToLiveBtn'); if (backBtn) backBtn.style.display='none';
   renderCaptureStrip();
@@ -2109,21 +2145,21 @@ window.addEventListener('beforeunload', () => {
 });
 document.addEventListener('DOMContentLoaded', init);
 </script>
-<dialog id="cameraDialog"><div class="dialog-title">相機取像設定<button class="btn" onclick="workspaceCameraClose()">關閉</button></div><div class="camera-actions"><button class="btn" onclick="cameraStart()">啟動／查看即時預覽</button><button class="btn" onclick="cameraRefresh()">讀取相機狀態</button><p id="qtiState">等待設備確認</p></div>      <img id="studioLive" hidden alt="相機即時預覽" style="width:100%;border-radius:8px">
-      <div class="camera-fields">
-      <p class="hint">相容模式只調白平衡；手動模式需設備韌體支援。讀回成功仍須確認實際影像。這些控制不是光學對焦。</p>
-      <label>控制模式<select id="qtiMode" onchange="cameraMode()"><option value="safe">相容模式</option><option value="off">不寫入控制</option><option value="manual">手動模式</option></select></label>
-      <label class="field">白平衡模式<input type="number" data-qti="white_balance_mode" data-default="0" min="0" max="10" step="1" value="0" disabled><small>尚未確認設備支援</small></label><label class="field">曝光補償<input type="number" data-qti="exposure_compensation" data-default="0" min="-12" max="12" step="1" value="0" disabled><small>尚未確認設備支援</small></label><label class="field">ISO 模式<input type="number" data-qti="iso_mode" data-default="0" min="0" max="8" step="1" value="0" disabled><small>尚未確認設備支援</small></label><label class="field">手動 ISO<input type="number" data-qti="manual_iso_value" data-default="800" min="100" max="3200" step="1" value="800" disabled><small>尚未確認設備支援</small></label><label class="field">抗閃爍模式<input type="number" data-qti="antibanding" data-default="3" min="0" max="3" step="1" value="3" disabled><small>尚未確認設備支援</small></label><label class="field">對比<input type="number" data-qti="contrast" data-default="5" min="1" max="10" step="1" value="5" disabled><small>尚未確認設備支援</small></label><label class="field">飽和度<input type="number" data-qti="saturation" data-default="5" min="0" max="10" step="1" value="5" disabled><small>尚未確認設備支援</small></label><label class="field">銳利度<input type="number" data-qti="sharpness" data-default="2" min="0" max="6" step="1" value="2" disabled><small>尚未確認設備支援</small></label>
-      <button class="btn primary" onclick="cameraApply()">儲存並重新啟動相機</button>
-      <p class="hint">變更後請重新擷取並驗證樣板；取像與正式檢測共用相機設定。</p>
-      <p class="hint" id="qtiApplied">—</p>
-      </div>
-</dialog><dialog id="testDialog"><div class="dialog-title">試跑樣板<button class="btn" onclick="document.getElementById('testDialog').close()">關閉</button></div><p>只測每個 Label；NG 命中代表找到異常，不代表整件合格。</p><div id="labelTestResults"></div></dialog><script src="/static/workspace.js?v=2.4.7-r4"></script><script src="/static/workspace_zoom.js?v=2.4.7-r3"></script><dialog id="imageTestDialog"><div class="dialog-title">圖片驗證<button class="btn" onclick="document.getElementById('imageTestDialog').close()">關閉</button></div>
+<dialog id="cameraDialog">
+  <div class="dialog-title">相機取像<button class="btn" onclick="workspaceCameraClose()">關閉</button></div>
+  <div class="camera-actions">
+    <button class="btn" onclick="cameraStart()">啟動／查看即時預覽</button>
+    <button class="btn" onclick="cameraRefresh()">讀取相機狀態</button>
+    <p id="cameraState">等待相機狀態</p>
+  </div>
+  <img id="studioLive" hidden alt="相機即時預覽" style="width:100%;border-radius:8px">
+  <p class="hint">相機來源與解析度請至「即時檢測」的設定頁調整；變更後請重新擷取並驗證樣板。</p>
+</dialog><dialog id="testDialog"><div class="dialog-title">試跑樣板<button class="btn" onclick="document.getElementById('testDialog').close()">關閉</button></div><p>只測每個 Label；NG 命中代表找到異常，不代表整件合格。</p><div id="labelTestResults"></div></dialog><script src="/static/latest_preview.js?v=2"></script><script src="/static/workspace.js?v=2.4.5-r6"></script><script src="/static/workspace_zoom.js?v=2.4.5-r3"></script>
+<dialog id="imageTestDialog"><div class="dialog-title">圖片驗證<button class="btn" onclick="document.getElementById('imageTestDialog').close()">關閉</button></div>
 <p class="hint">只驗證單一 Label 是否符合，不代表整件產品合格。NG Label 符合代表找到異常。測試不會修改樣板或流程。</p>
-<label>選擇 Label <select id="imageTestLabel" data-i18n-skip></select></label>
+<label><span>選擇 Label</span> <select id="imageTestLabel" data-i18n-skip></select></label>
 <p><label class="btn">載入測試圖片<input id="imageTestFiles" type="file" accept="image/png,image/jpeg" multiple onchange="runImageTests(this.files)" style="display:none"></label></p>
-<p class="hint">可選多張 PNG／JPEG，最多 20 張，每張 20 MB。請使用與取樣畫面相同尺寸及視角的完整圖片。</p>
+<p class="hint">可選多張 PNG／JPEG，最多 20 張，每張 20 MB。影像會套用目前的數位變焦，並依取樣解析度縮放比對框；視角不同仍需重新標註。</p>
 <p id="imageTestStatus" role="status"></p><div id="imageTestResults"></div><img id="imageTestPreview" hidden alt="測試圖片與比對位置" style="max-width:100%;max-height:55vh;object-fit:contain;margin-top:12px">
-</dialog><script src="/static/image_test.js?v=2.4.7"></script></body>
+</dialog><script src="/static/image_test.js?v=1"></script></body>
 </html>
-

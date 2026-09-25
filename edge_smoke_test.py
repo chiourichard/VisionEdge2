@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 
-from edge_runtime import EdgeRuntime, EDGE_PHOTO_DIR, EDGE_RECORD_DIR
+from edge_runtime import EdgeConfig, EdgeRuntime, SoftwareRecorder, EDGE_PHOTO_DIR, EDGE_RECORD_DIR
 
 
 BASE_PREVIEW_STUB = SimpleNamespace(
@@ -106,7 +106,9 @@ def run_preview_capture(video: Path, cfg: Path):
     rt = EdgeRuntime(BASE_PREVIEW_STUB, config_path=cfg)
     rt.update_config({
         'backend': 'opencv', 'source': str(video), 'rotation': 0,
-        'product_id': 0, 'preview_quality': 70, 'recording_fps': 15,
+        'product_id': 0, 'preview_quality': 70, 'preview_max_width': 320,
+        'recording_fps': 15,
+        'recording_width': 320, 'recording_height': 180,
         'loop_source': True, 'min_free_mb': 0,
     })
     assert rt.start()['success']
@@ -115,14 +117,25 @@ def run_preview_capture(video: Path, cfg: Path):
     assert st.get('warning','') == '', st
     assert 'storage_free_mb' in st and 'storage_reserve_mb' in st, st
     assert rt.jpeg('raw'), 'raw preview missing'
+    preview = cv2.imdecode(np.frombuffer(rt.jpeg('raw'), dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert preview.shape[1] == 320 and rt.latest_raw.shape[1] == 640
     snap = rt.snapshot('raw')
     assert snap['success'], snap
     start_seq = rt.status()['frame_seq']
+    # A warm-up source FPS sample must not change the requested MP4 timebase.
+    rt.source_fps = 9.49
     rec = rt.start_recording('raw')
     assert rec['success'], rec
     assert wait_for(lambda: rt.status()['frame_seq'] >= start_seq + 12), rt.status()
     rec_stop = rt.stop_recording()
     assert rec_stop['success'], rec_stop
+    assert rec_stop['fps'] == 15, rec_stop
+    recorded = cv2.VideoCapture(rec_stop['path'])
+    assert recorded.isOpened(), rec_stop
+    assert abs(recorded.get(cv2.CAP_PROP_FPS) - 15) < 0.1, rec_stop
+    assert (int(recorded.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            int(recorded.get(cv2.CAP_PROP_FRAME_HEIGHT))) == (320, 180), rec_stop
+    recorded.release()
     media = rt.list_media()
     assert media['photos'] and media['recordings'], media
     assert rt.stop()['success']
@@ -148,6 +161,24 @@ def run_fake_inference(video: Path, cfg: Path):
     assert rt.stop()['success']
 
 
+def run_recorder_pacing(path: Path):
+    recorder = SoftwareRecorder(EdgeConfig(recording_fps=10))
+    frame = np.zeros((64, 64, 3), dtype=np.uint8)
+    assert recorder.start(frame, path, 'raw', fps=21.4)[0]
+    start = recorder.next_frame_at
+    for offset in (0, .05, .21, .31, .42):
+        recorder.write(frame, None, captured_at=start + offset)
+        # Let the worker consume each synthetic arrival before sending another.
+        end = time.monotonic() + 1
+        while recorder._queue.qsize() and time.monotonic() < end:
+            time.sleep(.001)
+    result = recorder.stop()
+    cap = cv2.VideoCapture(result['path'])
+    assert cap.isOpened() and int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) == 5, result
+    assert abs(cap.get(cv2.CAP_PROP_FPS) - 10) < .1, result
+    cap.release()
+
+
 def main():
     before_photos = {p.name for p in EDGE_PHOTO_DIR.glob('*') if p.is_file()}
     before_recs = {p.name for p in EDGE_RECORD_DIR.glob('*') if p.is_file()}
@@ -158,6 +189,7 @@ def main():
             make_video(video)
             snap, rec_stop = run_preview_capture(video, td / 'preview.ini')
             run_fake_inference(video, td / 'infer.ini')
+            run_recorder_pacing(td / 'paced.mp4')
             print('EDGE_SMOKE_TEST PASS')
             print('snapshot:', snap['path'])
             print('recording:', rec_stop.get('relative_path') or rec_stop.get('path'))

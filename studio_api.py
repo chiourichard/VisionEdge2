@@ -1,5 +1,5 @@
 """Reusable label library: edits update same-product rules; foreign products keep snapshots."""
-import hashlib,json,math
+import base64,hashlib,json,math,threading
 import cv2
 from flask import request,jsonify,send_from_directory
 
@@ -7,63 +7,29 @@ def version(row):
  return hashlib.sha256(json.dumps(dict(row),sort_keys=True,default=str).encode()).hexdigest()[:24]
 
 def register(app,base,edge):
- def delete_studio_product(pid):
-  with edge.control_lock:
-   status=edge.status()
-   if edge.cfg.product_id==pid:
-    if status.get('running') or status.get('recording') or edge.inspection_active() or (edge.packaging and edge.packaging.cycle_id):
-     return jsonify(error='此產品正在使用中，請先結束檢測並停止相機，或切換檢測產品，再刪除'),409
-   db=base.get_db()
-   try:
-    if not db.execute('SELECT id FROM products WHERE id=?',(pid,)).fetchone():return jsonify(error='找不到產品'),404
-    # Snapshot samples in other products remain usable; live legacy references cannot be removed silently.
-    linked=db.execute('SELECT 1 FROM inspection_rule_items t JOIN inspection_rules i ON i.id=t.rule_id JOIN regions r ON r.id=t.region_id WHERE r.product_id=? AND i.product_id<>? LIMIT 1',(pid,pid)).fetchone()
-    if linked:return jsonify(error='其他產品的規則仍引用此產品的 Label，請先移除引用再刪除'),409
-    if edge.cfg.product_id==pid:
-     result=edge.update_config({'product_id':0})
-     if not result.get('success'):return jsonify(result),409
-    db.execute('DELETE FROM products WHERE id=?',(pid,));db.commit()
-    return jsonify(ok=True)
-   finally:db.close()
- app.view_functions['delete_product']=delete_studio_product
+ image_test_slot = threading.BoundedSemaphore(1)
  @app.route('/camera-settings')
  def camera_settings_page():return send_from_directory('static','camera_settings.html')
- @app.route('/api/products/<int:pid>/label-library/<int:rid>/image-test',methods=['POST'])
- def test_label_image(pid,rid):
-  # Read-only diagnostics: no camera, SOP progression or inspection-history writes.
+
+ @app.route('/api/edge/camera-controls',methods=['GET','PUT'])
+ def camera_controls():
+  from v4l2_controls import query,validate
+  if request.method=='GET':
+   report=query(edge.cfg.source)
+   return jsonify(**report,backend=edge.actual_backend or edge.cfg.backend,
+    mode=edge.cfg.camera_controls_mode,values=json.loads(edge.cfg.camera_control_values))
   body=request.get_json(silent=True) or {}
-  encoded=body.get('image_b64') if isinstance(body,dict) else None
-  if not isinstance(encoded,str) or not encoded or len(encoded)>28_000_000:
-   return jsonify(error='請提供 20 MB 以下的測試圖片'),400
-  try:frame=base.b64_to_cv2(encoded)
-  except Exception:frame=None
-  if frame is None:return jsonify(error='無法讀取圖片，請使用 PNG 或 JPEG'),400
-  if frame.shape[0]*frame.shape[1]>25_000_000:return jsonify(error='圖片超過 2500 萬像素'),400
-  db=base.get_db()
+  if not isinstance(body,dict):return jsonify(error='相機設定格式無效'),400
+  if edge.actual_backend=='qti' or edge.cfg.backend=='qti':
+   return jsonify(error='此頁面只支援 V4L2 USB 相機'),409
   try:
-   row=db.execute('''SELECT r.*,COALESCE(g.thumb_b64,p.reference_img_b64) AS source_frame
-     FROM regions r JOIN products p ON p.id=r.product_id
-     LEFT JOIN capture_groups g ON g.id=r.capture_group_id
-     WHERE r.product_id=? AND r.id=?''',(pid,rid)).fetchone()
-   if row is None:return jsonify(error='找不到 Label'),404
-   reg=dict(row)
-  finally:db.close()
-  source=base.b64_to_cv2(reg.get('source_frame') or '')
-  if source is not None and source.shape[:2]!=frame.shape[:2]:
-   return jsonify(error=f'測試圖片尺寸須與取樣畫面一致：{source.shape[1]}×{source.shape[0]}；目前為 {frame.shape[1]}×{frame.shape[0]}'),400
-  tpl=base.b64_to_cv2(reg.get('template_b64') or '')
-  if tpl is None:return jsonify(error='無法讀取樣板'),400
-  reg['tpl_gray']=cv2.cvtColor(tpl,cv2.COLOR_BGR2GRAY)
-  reg['th'],reg['tw']=reg['tpl_gray'].shape
-  if edge._method()==cv2.TM_CCOEFF_NORMED and float(reg['tpl_gray'].std())<1e-6:
-   return jsonify(error='樣板沒有明暗特徵，無法可靠比對；請重新標記包含邊緣或紋理的區域'),400
-  gray=cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
-  result=base.vc._match_one_template(gray,*gray.shape,reg,edge._method())
-  if result.get('match_loc'):
-   x,y=result['match_loc'];w,h=result['match_size']
-   cv2.rectangle(frame,(x,y),(x+w,y+h),(50,170,30) if result['pass'] else (40,40,220),2)
-  return jsonify(result=result,image_b64=base.cv2_to_b64(frame),sample_hint=reg.get('sample_hint','OK'),
-    search_margin=reg.get('search_margin',0),scope='single_label_only')
+   mode,values=validate(edge.cfg.source,body.get('mode','off'),body.get('values',{}))
+  except (ValueError,TypeError,OverflowError) as exc:
+   return jsonify(error=str(exc)),400
+  result=edge.update_config({'camera_controls_mode':mode,'camera_control_values':values},
+                            restart=bool(body.get('restart',False)))
+  return jsonify(result),200 if result.get('success') else 409
+
  @app.route('/template-studio')
  def template_studio_page():return send_from_directory('static','template_workspace.html')
 
@@ -112,6 +78,53 @@ def register(app,base,edge):
    except (ValueError,TypeError,KeyError,OverflowError) as exc:return jsonify(error=str(exc)),400
    finally:db.close()
 
+ @app.route('/api/products/<int:pid>/label-library/<int:rid>/image-test',methods=['POST'])
+ def test_label_image(pid,rid):
+  # Read-only diagnostics: never update SOP state or inspection history.
+  body=request.get_json(silent=True) or {}
+  encoded=body.get('image_b64') if isinstance(body,dict) else None
+  if not isinstance(encoded,str) or not encoded or len(encoded)>28_000_000:
+   return jsonify(error='請提供 20 MB 以下的測試圖片'),400
+  if not image_test_slot.acquire(blocking=False):
+   return jsonify(error='圖片驗證正在執行，請稍後再試'),429
+  try:
+   try:frame=base.b64_to_cv2(encoded)
+   except (ValueError,TypeError,OverflowError):frame=None
+   if frame is None:return jsonify(error='無法讀取圖片，請使用 PNG 或 JPEG'),400
+   if frame.shape[0]*frame.shape[1]>25_000_000:
+    return jsonify(error='圖片超過 2500 萬像素'),400
+   product=base._load_product_dict(pid)
+   if not product:return jsonify(error='找不到產品'),404
+   frame=base._prepare_edge_frame(frame,product)
+   mgr=base.vc.CacheManager(base.DB_PATH,pid)
+   if not mgr.initial_load():return jsonify(error='無法讀取樣板'),400
+   reg=next((r for r in mgr.get().regions if int(r['id'])==rid),None)
+   if reg is None:return jsonify(error='找不到 Label'),404
+   method=edge._method()
+   if method==cv2.TM_CCOEFF_NORMED and float(reg['tpl_gray'].std())<1e-6:
+    return jsonify(error='樣板沒有明暗特徵，請重新標記包含邊緣或紋理的區域'),400
+   matcher=base.vc.TemplateMatcher(getattr(edge.cfg,'inference_device','cpu'),method)
+   matcher.prepare([reg['tpl_gray']])
+   result=matcher.begin(frame).match(reg)
+   if result.get('match_loc'):
+    x,y=result['match_loc'];w,h=result['match_size']
+    cv2.rectangle(frame,(x,y),(x+w,y+h),(50,170,30) if result['pass'] else (40,40,220),2)
+   display=frame
+   if display.shape[1]>1280:
+    display=cv2.resize(display,(1280,round(display.shape[0]*1280/display.shape[1])),
+                       interpolation=cv2.INTER_AREA)
+   encoded_ok,preview=cv2.imencode('.jpg',display,[cv2.IMWRITE_JPEG_QUALITY,75])
+   if not encoded_ok:raise RuntimeError('無法建立圖片驗證預覽')
+   preview_b64='data:image/jpeg;base64,'+base64.b64encode(preview).decode()
+   return jsonify(result=result,image_b64=preview_b64,
+    sample_hint=reg.get('sample_hint','OK'),search_margin=reg.get('search_margin',0),
+    inference_device=matcher.device,scope='single_label_only')
+  except Exception as exc:
+   app.logger.exception('image test failed')
+   return jsonify(error=f'圖片驗證失敗：{exc}'),503
+  finally:
+   image_test_slot.release()
+
  @app.route('/api/products/<int:pid>/label-library/test',methods=['POST'])
  def test_library(pid):
   # Diagnostic only: never moves the production SOP or writes inspection history.
@@ -121,9 +134,16 @@ def register(app,base,edge):
     frame=edge.latest_raw.copy()
    product=base._load_product_dict(pid)
    if not product:return jsonify(error='找不到產品'),404
-   frame=base._prepare_frame(frame,product)
+   prepare=getattr(base,'_prepare_edge_frame',base._prepare_frame)
+   frame=prepare(frame,product)
    mgr=base.vc.CacheManager(base.DB_PATH,pid)
    if not mgr.initial_load():return jsonify(error='無法讀取樣板'),400
-   gray=cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
-   results=[base.vc._match_one_template(gray,*gray.shape,r,edge._method()) for r in mgr.get().regions]
+   try:
+    matcher=base.vc.TemplateMatcher(getattr(edge.cfg,'inference_device','cpu'),edge._method())
+    cache=mgr.get()
+    matcher.prepare([r['tpl_gray'] for r in cache.regions])
+    match_frame=matcher.begin(frame)
+    results=[match_frame.match(r) for r in cache.regions]
+   except Exception as exc:
+    return jsonify(error=f'樣板試跑失敗：{exc}'),503
    return jsonify(results=results,image_b64=base.cv2_to_b64(frame),scope='labels_only',revision=str(mgr._version))

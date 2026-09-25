@@ -15,4 +15,3 @@ header{background:#ffffffed;height:auto;min-height:64px;flex-wrap:wrap;padding:1
 .btn.label-delete{display:inline-flex;align-items:center;justify-content:center;min-width:64px;min-height:34px;padding:6px 12px;background:#fff1f0;color:#b42318;border:1px solid #f2bbb5;font-size:13px;white-space:nowrap}.btn.label-delete:hover{background:#ffe0dc}.btn.danger{color:#b42318;background:#fff1f0;border:1px solid #f2bbb5}#saveControls{flex-wrap:wrap}.toolbar{flex-wrap:wrap}
 #captureStripItems button{width:24px!important;height:24px!important;line-height:24px!important;font-size:17px!important}
 .toolbar #editControls{order:3;flex:1 0 100%;flex-wrap:wrap}.toolbar #saveControls{order:2}.toolbar #modeLabel{order:0}
-#imageTestDialog{margin:auto;width:min(900px,calc(100vw - 32px));max-height:85vh}#imageTestResults strong{display:block;margin:5px 0;font-size:15px}#imageTestResults button{margin-top:6px}

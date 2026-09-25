@@ -459,6 +459,8 @@ const S = {           // state
   // coords = original pixels, no scale
   regions: [],
   scale: 1,
+  imageWidth: 0,
+  imageHeight: 0,
   imgLoaded: false,
   srcB64: null,          // original-resolution b64, used for template crop on save
   // Pinned captures: lets one labeling session safely hold boxes drawn on more than
@@ -873,6 +875,8 @@ function displayImg(b64) {
       const maxW = wrap.clientWidth  - 24;
       const maxH = wrap.clientHeight - 24;
       S.scale = Math.min(1, maxW / img.width, maxH / img.height);
+      S.imageWidth = img.width;
+      S.imageHeight = img.height;
       const dW = Math.round(img.width  * S.scale);
       const dH = Math.round(img.height * S.scale);
       [MC, OC, DC].forEach(c => { c.width=dW; c.height=dH; });
@@ -1234,6 +1238,8 @@ function _layoutLabelVideo() {
   const maxW = Math.max(1, wrap.clientWidth - 24);
   const maxH = Math.max(1, wrap.clientHeight - 24);
   S.scale = Math.min(1, maxW / LV.videoWidth, maxH / LV.videoHeight);
+  S.imageWidth = LV.videoWidth;
+  S.imageHeight = LV.videoHeight;
   const dW = Math.max(1, Math.round(LV.videoWidth * S.scale));
   const dH = Math.max(1, Math.round(LV.videoHeight * S.scale));
   LV.style.width = dW + 'px';
@@ -1592,6 +1598,7 @@ function drawEnd() {
   // at save time.
   const region = {
     label, sample_hint:hint, x, y, w, h, threshold:thr, search_margin:0, _sel:false,
+    source_width:S.imageWidth, source_height:S.imageHeight,
     _srcB64: srcB64,
     _captureId: captureId,
     _videoTimeLabel: currentVideoTimeLabel(),
@@ -1628,23 +1635,25 @@ function drawOverlay() {
   const placedLabels = []; // already-placed label rects, so a cluster of boxes doesn't
                             // end up with every label text stacked illegibly in one spot
   visible.forEach((r,i)=>{
-    const cx=r.x*S.scale, cy=r.y*S.scale, cw=r.w*S.scale, ch=r.h*S.scale;
-    const mg=(r.search_margin||0)*S.scale;
+    const sx=(Number(r.source_width)>0 && S.imageWidth>0)?S.imageWidth/Number(r.source_width):1;
+    const sy=(Number(r.source_height)>0 && S.imageHeight>0)?S.imageHeight/Number(r.source_height):1;
+    const cx=r.x*sx*S.scale, cy=r.y*sy*S.scale, cw=r.w*sx*S.scale, ch=r.h*sy*S.scale;
+    const mgx=(r.search_margin||0)*sx*S.scale, mgy=(r.search_margin||0)*sy*S.scale;
     const sel=r._sel;
     const hint=cleanSampleHint(r.sample_hint);
     const clr=sel?'#f0a500':(hint==='NG'?'#f85149':(hint==='NEUTRAL'?'#8b949e':(S.editMode?'#58a6ff':'#3fb950')));
 
     // Search margin dashed box
-    if (mg>0) {
+    if (mgx>0 || mgy>0) {
       Octx.save();
       Octx.strokeStyle='rgba(180,180,60,.75)'; Octx.lineWidth=1;
       Octx.setLineDash([4,3]);
-      Octx.strokeRect(cx-mg+.5, cy-mg+.5, cw+mg*2, ch+mg*2);
+      Octx.strokeRect(cx-mgx+.5, cy-mgy+.5, cw+mgx*2, ch+mgy*2);
       Octx.setLineDash([]);
       Octx.fillStyle='rgba(180,180,60,.05)';
-      Octx.fillRect(cx-mg+.5, cy-mg+.5, cw+mg*2, ch+mg*2);
+      Octx.fillRect(cx-mgx+.5, cy-mgy+.5, cw+mgx*2, ch+mgy*2);
       Octx.font='bold 10px monospace'; Octx.fillStyle='rgba(180,180,60,.9)';
-      Octx.fillText(`±${r.search_margin}px`, cx-mg+3, cy-mg+11);
+      Octx.fillText(`±${r.search_margin}px`, cx-mgx+3, cy-mgy+11);
       Octx.restore();
     }
     // ROI box

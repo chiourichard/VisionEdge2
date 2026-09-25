@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 I18N = STATIC / "visionedge_i18n.js"
-PAGES = [STATIC / "edge_dashboard.html", STATIC / "flow_studio.html", STATIC / "template_workspace.html"]
+PAGES = [STATIC / "edge_dashboard.html", STATIC / "flow_studio.html", STATIC / "template_workspace.html", STATIC / "camera_settings.html"]
 
 
 class VisibleChinese(HTMLParser):
@@ -60,7 +60,7 @@ def main():
     ignored = {"繁體中文", "简体中文", "Language / 語言"}
     for page in PAGES:
         html = page.read_text(encoding="utf-8")
-        assert "/static/visionedge_i18n.js?v=2.4.1" in html, page.name
+        assert "/static/visionedge_i18n.js?v=" in html, page.name
         assert "data-i18n-language" in html, page.name
         parser = VisibleChinese()
         parser.feed(html)

@@ -14,6 +14,7 @@ import configparser
 import os
 import socket
 import ssl
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -68,6 +69,7 @@ class ServerConfig:
 
 EDGE = EdgeRuntime(base)
 app = base.app
+app.extensions['visionedge_runtime'] = EDGE
 from inspection_history import register_inspections
 INSPECTIONS = register_inspections(app, EDGE, base, BASE_DIR / 'runtime_data' / 'inspection_history.sqlite3')
 from packaging_api import register as register_packaging
@@ -82,7 +84,9 @@ register_workspace(app, base, EDGE)
 def visionedge_no_cache(response):
     # Dynamic state/media APIs must never be served from the browser cache.
     # This is especially important after deleting a capture.
-    if request.path.startswith('/api/edge') or '/label-library' in request.path or request.path.endswith('/workspace'):
+    if (request.path.startswith(('/api/edge', '/api/products')) or request.path == '/api/templates'
+            or '/label-library' in request.path
+            or request.path.endswith('/workspace')):
         response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
         response.headers['Pragma'] = 'no-cache'
         response.headers['Expires'] = '0'
@@ -125,7 +129,7 @@ def edge_template_frame():
     product = base._load_product_dict(request.args.get('product_id', type=int))
     if not product:
         return jsonify({'error': '請先建立或選擇產品'}), 400
-    return jsonify({'image_b64': base.cv2_to_b64(base._prepare_frame(frame, product))})
+    return jsonify({'image_b64': base.cv2_to_b64(base._prepare_edge_frame(frame, product))})
 
 
 @app.route('/api/edge/config', methods=['GET'])
@@ -169,16 +173,28 @@ def edge_frame():
     return Response(data, mimetype='image/jpeg', headers={'Cache-Control': 'no-store'})
 
 
+@app.route('/api/edge/preview.jpg', methods=['GET'])
+def edge_preview():
+    token, data = EDGE.preview_frame(request.args.get('mode', 'raw'), request.args.get('after'))
+    headers = {'Cache-Control': 'no-store', 'X-Frame-Sequence': token}
+    return Response(data if data else None, status=200 if data else 204,
+                    mimetype='image/jpeg', headers=headers)
+
+
 @app.route('/api/edge/live.mjpg', methods=['GET'])
 def edge_mjpeg():
     mode = request.args.get('mode', 'result')
 
     def generate():
-        seq = -1
-        while True:
+        seq = None
+        next_frame = 0.0
+        while not EDGE.stop_event.is_set():
+            if EDGE.stop_event.wait(max(0, next_frame - time.monotonic())):
+                break
             seq, data = EDGE.wait_jpeg(seq, mode=mode, timeout=2.0)
             if not data:
                 continue
+            next_frame = time.monotonic() + .1
             yield (
                 b'--frame\r\nContent-Type: image/jpeg\r\n'
                 b'Cache-Control: no-store\r\n\r\n' + data + b'\r\n'
@@ -389,7 +405,8 @@ def main():
     except Exception:
         app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
         return
-    serve(app, host=host, port=port, threads=max(4, threads), channel_timeout=120)
+    serve(app, host=host, port=port, threads=max(4, threads), channel_timeout=120,
+          outbuf_high_watermark=256 * 1024, outbuf_overflow=256 * 1024)
 
 
 if __name__ == '__main__':

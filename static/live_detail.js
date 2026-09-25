@@ -10,6 +10,9 @@ function labelScoreModel(r){
 }
 function renderLabelScores(d){
  const root=document.getElementById('labelScores');if(!root)return;
+ const key=[d.product_id,d.active_revision,d.infer_seq,d.inference_ready,d.frame_fresh,d.definition_pending].join('|');
+ if(root.dataset.renderKey===key)return;
+ root.dataset.renderKey=key;
  if(!d.inference_ready||!d.frame_fresh||d.definition_pending){root.innerHTML='<p class="subtle">等待有效檢測結果</p>';return}
  const rows=Array.isArray(d.results)?d.results:[];
  if(!rows.length){root.innerHTML='<p class="subtle">尚無 Label 比對結果</p>';return}

@@ -82,7 +82,7 @@ def main():
     assert defaults.recording_bitrate == 0
     assert defaults.min_free_mb == 10240
 
-    # Software recording accepts measured source FPS instead of forcing 30 FPS.
+    # The recorder honors an explicit FPS override when used directly.
     with tempfile.TemporaryDirectory(prefix='visionedge-rec-fps-') as rd:
         rec = SoftwareRecorder(defaults)
         frame = np.zeros((120, 160, 3), np.uint8)
@@ -121,7 +121,7 @@ def main():
     print('Config save preserves HTTPS [server]: PASS')
     print('UI navigation + operator-safe settings: PASS')
     print('Edge defaults (30 camera / 5 AI / auto bitrate / 10 GB reserve): PASS')
-    print('Measured-FPS software recording: PASS')
+    print('Software recording FPS override: PASS')
 
 
 if __name__ == '__main__':

@@ -1,3 +1,0 @@
-PASS: JS syntax, flow_designer_test.py, label_flow_regression_test.py, i18n_static_test.py
-Browser: camera capture at 1920x1080; 100% and 200% ROI stored in original coordinates; pan creates no ROI; no JS errors.
-See RELEASE_2.3.1_ZH.md for exact saved coordinates. Field hardware not tested.

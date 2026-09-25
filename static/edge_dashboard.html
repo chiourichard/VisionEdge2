@@ -41,7 +41,6 @@ button,select,input{font:inherit}button{cursor:pointer}button:disabled{cursor:no
 .toggleLine{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid #2b3b55;border-radius:9px;padding:10px 11px;background:#101a2a}.toggleCopy strong{display:block;font-size:12px}.toggleCopy span{display:block;margin-top:3px;font-size:10px;color:var(--muted)}.switch{position:relative;width:44px;height:24px;flex:none}.switch input{display:none}.slider{position:absolute;inset:0;background:#314058;border-radius:999px;transition:.2s}.slider:before{content:"";position:absolute;width:18px;height:18px;left:3px;top:3px;background:#d9e2ef;border-radius:50%;transition:.2s}.switch input:checked+.slider{background:#246f53}.switch input:checked+.slider:before{transform:translateX(20px)}
 .settingsFooter{position:sticky;bottom:0;z-index:5;margin-top:14px;display:flex;align-items:center;gap:10px;padding:12px 14px;border:1px solid #2a3b56;border-radius:12px;background:#0b1422ee;backdrop-filter:blur(10px)}.settingsFooter .hint{font-size:11px;color:var(--muted);line-height:1.4}.settingsFooter .action{min-width:128px}
 .devCard{grid-column:1/-1}.devFields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.diagnostics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:12px}.diag{border:1px solid #2b3b55;border-radius:9px;padding:9px;background:#0c1523}.diag span{display:block;font-size:10px;color:var(--muted)}.diag strong{display:block;margin-top:4px;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.hidden{display:none!important}
-.toast{position:fixed;right:18px;bottom:18px;z-index:100;max-width:min(560px,calc(100vw - 36px));padding:10px 13px;border:1px solid #344762;border-radius:10px;background:#101a2bea;color:var(--text);font-size:12px;box-shadow:0 16px 38px #0006;opacity:0;transform:translateY(8px);pointer-events:none;transition:.18s}.toast.show{opacity:1;transform:none}.toast.err{border-color:#8c3344;color:#ffc0c7}.toast.warn{border-color:#765c24;color:#ffe0a0}.toast.ok{border-color:#28775a;color:#a9f3ce}
 @media(max-width:1100px){.layout{grid-template-columns:1fr}.settingsGrid{grid-template-columns:1fr}.devCard{grid-column:auto}}
 @media(max-width:760px){.topbar{padding:8px;flex-wrap:wrap}.brand small,.chip.optional{display:none}.topnav{order:3;width:100%;height:38px;margin:0;border-top:1px solid #1d2a40}.topnav button{flex:1}.wrap{padding:8px}.controlPanel{grid-template-columns:1fr}.metrics{grid-template-columns:1fr 1fr 1fr}.fieldGrid,.devFields,.diagnostics{grid-template-columns:1fr}.viewerTools .toolLabel{display:none}.settingsFooter{flex-wrap:wrap}.settingsFooter .grow{display:none}.mediaTable th:nth-child(3),.mediaTable td:nth-child(3){display:none}}
 
@@ -54,8 +53,8 @@ button,select,input{font:inherit}button{cursor:pointer}button:disabled{cursor:no
 
 @media(max-width:500px){.topbar>.chip{display:none}.mediaTable th,.mediaTable td{padding:8px}.mediaName{max-width:125px}.mini{padding:6px}.viewerTools{flex-wrap:wrap}}
 </style>
-<link rel="stylesheet" href="/static/apple.css?v=2.4.8">
-<link rel="stylesheet" href="/static/primary_nav.css?v=2.4.8"><link rel="stylesheet" href="/static/live_detail.css?v=2.4.8"></head>
+<link rel="stylesheet" href="/static/apple.css?v=2.4.5">
+<link rel="stylesheet" href="/static/primary_nav.css?v=2.4.5"><link rel="stylesheet" href="/static/notice.css?v=1"><link rel="stylesheet" href="/static/live_detail.css?v=1"></head>
 <body>
 <header class="topbar">
   <div class="brand">VisionEdge <small>產線視覺檢測</small></div>
@@ -66,7 +65,7 @@ button,select,input{font:inherit}button{cursor:pointer}button:disabled{cursor:no
   <span class="chip optional">AI <strong id="topAI">CAMERA ONLY</strong></span>
   <label class="languagePicker" title="Language / 語言"><span aria-hidden="true">🌐</span><select data-i18n-language aria-label="Language" onchange="VisionEdgeI18n.setLanguage(this.value)"><option value="zh-Hant">繁體中文</option><option value="zh-Hans">简体中文</option><option value="en">English</option><option value="es">Español</option></select></label>
 
-<button class="btn" onclick="inspectionNavigate('/camera-settings')">相機設定</button></header><nav class="primary-navigation" aria-label="主要導覽"><button type="button" class="primary-tab" aria-current="page" onclick="switchPage('live')">即時檢測</button><button type="button" class="primary-tab" onclick="inspectionNavigate('/template-studio')">取像與樣板</button><button type="button" class="primary-tab" onclick="inspectionNavigate('/flow-studio')">規則／流程</button></nav><div class="inspection-sections">  <nav class="topnav" aria-label="VisionEdge pages">
+<button class="action" onclick="inspectionNavigate('/camera-settings')">相機設定</button></header><nav class="primary-navigation" aria-label="主要導覽"><button type="button" class="primary-tab" aria-current="page" onclick="switchPage('live')">即時檢測</button><button type="button" class="primary-tab" onclick="inspectionNavigate('/template-studio')">取像與樣板</button><button type="button" class="primary-tab" onclick="inspectionNavigate('/flow-studio')">規則／流程</button></nav><div class="inspection-sections">  <nav class="topnav" aria-label="VisionEdge pages">
     <button id="pageLiveBtn" class="on" onclick="switchPage('live')">檢測畫面</button>
     <button id="pageHistoryBtn" onclick="switchPage('history')">檢測履歷</button>
     <button id="pageMediaBtn" onclick="switchPage('media')">照片與錄影</button>
@@ -88,11 +87,11 @@ button,select,input{font:inherit}button{cursor:pointer}button:disabled{cursor:no
           <div class="viewerTools">
             <span class="toolLabel">顯示內容</span>
             <div class="segment" aria-label="Live view source">
-              <button id="viewRaw" onclick="setView('raw')">原始畫面</button>
-              <button id="viewResult" class="on" onclick="setView('result')">檢測結果</button>
+              <button id="viewRaw" class="on" onclick="setView('raw')">原始畫面</button>
+              <button id="viewResult" onclick="setView('result')">檢測結果</button>
             </div>
           </div>
-          <button class="action" id="expandLive" onclick="toggleLiveExpanded()">放大畫面</button>
+          <button class="action" id="expandLive" onclick="toggleLiveExpanded()" aria-expanded="false">放大畫面</button>
           <span id="verdict" class="state idle">WAIT</span>
         </div>
 
@@ -208,7 +207,7 @@ button,select,input{font:inherit}button{cursor:pointer}button:disabled{cursor:no
           <div class="settingsSectionHint">選擇相機解析度與畫面方向。</div>
           <div class="fieldGrid">
             <div class="field"><label for="camera">相機</label><select id="camera"><option value="0">相機 0</option></select><div class="fieldNote">使用設備的預設相機。</div></div>
-            <div class="field"><label for="resolution">解析度</label><select id="resolution"><option value="1920x1080">1920 × 1080</option><option value="3840x2160">3840 × 2160</option></select><div class="fieldNote">變更解析度後會重新啟動相機。</div></div>
+            <div class="field"><label for="resolution">解析度</label><select id="resolution"><option value="1920x1080">1920 × 1080</option><option value="3840x2160">3840 × 2160</option></select><div class="fieldNote">變更後會重啟相機；相同長寬比的既有樣板會按來源解析度縮放。請重新確認框位置與判定分數，若視角或變焦改變則需重新標註。</div></div>
             <div class="field"><label for="rotation">畫面方向</label><select id="rotation"><option value="0">0°</option><option value="180">180°</option></select></div>
           </div>
           <div style="margin-top:12px" class="toggleLine">
@@ -265,36 +264,40 @@ button,select,input{font:inherit}button{cursor:pointer}button:disabled{cursor:no
   </section>
 </main>
 
-<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
 
 <script src="/static/visionedge_i18n.js?v=2.4.8"></script>
-<script src="/static/live_detail.js?v=2.4.8"></script>
+<script src="/static/latest_preview.js?v=2"></script><script src="/static/notice.js?v=2"></script><script src="/static/live_detail.js?v=1"></script>
 <script>
 const $=id=>document.getElementById(id), A='/api/edge';
 const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 function inspectionNavigate(path){if(settingsBusy)return;if(settingsDirty&&!confirm('尚有未儲存的修改，確定離開？'))return;settingsDirty=false;location.href=path+'?product_id='+(lastStatus.product_id||0)}
-let lastStatus={},viewMode='result',cameraBusy=false,recordBusy=false,settingsBusy=false,mediaVersion=-1,mediaTab='all',mediaRows=[],recSince=null,toastTimer=null,currentPage='live',settingsBaseline='',settingsDirty=false,lastWarning='',lastMediaRefresh=0;
+let lastStatus={},viewMode='result',cameraBusy=false,recordBusy=false,settingsBusy=false,mediaVersion=-1,mediaTab='all',mediaRows=[],recSince=null,currentPage='live',settingsBaseline='',settingsDirty=false,lastWarning='',lastMediaRefresh=0;
 
 async function req(url,opt={}){const options={cache:'no-store',signal:AbortSignal.timeout(15000),...opt};const r=await fetch(url,options),t=await r.text();let d={};try{d=t?JSON.parse(t):{}}catch{throw Error(t||r.statusText)}if(!r.ok)throw Error(d.error||r.statusText);return d}
-function message(s,kind=''){const x=$('toast');if(!s){x.className='toast';return}x.textContent=s;x.className='toast show '+kind;clearTimeout(toastTimer);toastTimer=setTimeout(()=>x.className='toast',4200)}
+function message(s,kind=''){VisionEdgeNotice.show(s,kind)}
 function fmtDuration(sec){sec=Math.max(0,Math.floor(Number(sec)||0));const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;return h?`${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`:`${m}:${String(s).padStart(2,'0')}`}
 function fsize(n){n=Number(n)||0;if(n<1024)return n+' B';if(n<1048576)return(n/1024).toFixed(1)+' KB';if(n<1073741824)return(n/1048576).toFixed(1)+' MB';return(n/1073741824).toFixed(2)+' GB'}
 function fmtGb(mb){if(mb===null||mb===undefined||Number.isNaN(Number(mb)))return'--';return (Number(mb)/1024).toFixed(Number(mb)>=10240?1:2).replace(/\.0$/,'')+' GB'}
 function mediaUrl(path,download=false){return `${A}/media/${String(path).split('/').map(encodeURIComponent).join('/')}${download?'?download=1':''}`}
-function switchPage(page){currentPage=page;for(const p of ['live','history','media','settings']){$('page'+p[0].toUpperCase()+p.slice(1)).classList.toggle('active',p===page);$('page'+p[0].toUpperCase()+p.slice(1)+'Btn').classList.toggle('on',p===page)}if(page==='media')loadMedia(false);if(page==='history'){loadHistory(true);loadPackHistory(true)}}
+function switchPage(page){if(page!=='live'&&document.querySelector('.camera-card').classList.contains('live-expanded'))setLiveExpanded(false);currentPage=page;reloadStream();for(const p of ['live','history','media','settings']){$('page'+p[0].toUpperCase()+p.slice(1)).classList.toggle('active',p===page);$('page'+p[0].toUpperCase()+p.slice(1)+'Btn').classList.toggle('on',p===page)}if(page==='media')loadMedia(false);if(page==='history'){loadHistory(true);loadPackHistory(true)}}
 
 function setView(mode){if(mode==='result'&&Number(lastStatus.product_id||0)<=0){message('請先選擇檢測產品。','warn');return}viewMode=mode==='result'?'result':'raw';$('viewRaw').classList.toggle('on',viewMode==='raw');$('viewResult').classList.toggle('on',viewMode==='result');updateSnapshotLabel();reloadStream()}
 function updateSnapshotLabel(){$('snapshotBtn').textContent=effectiveLiveView()==='result'?'儲存結果畫面':'儲存畫面'}
-function reloadStream(){if(!lastStatus.running){$('live').removeAttribute('src');return}$('live').src=`${A}/live.mjpg?mode=${effectiveLiveView()}&t=${Date.now()}`}
+const preview = new LatestPreview($('live'), `${A}/preview.jpg`);
+function reloadStream(){preview.configure(!!lastStatus.running && !!lastStatus.frame_fresh && currentPage==='live' && !document.hidden && !cameraBusy && !settingsBusy, effectiveLiveView())}
+document.addEventListener('visibilitychange',reloadStream);
+window.addEventListener('pagehide',()=>preview.stop());
+window.addEventListener('pageshow',reloadStream);
 
-async function toggleCamera(){if(cameraBusy)return;if(lastStatus.recording){message('請先停止錄影。','warn');return}cameraBusy=true;renderStatus(lastStatus);try{const running=!!lastStatus.running;message(running?'正在停止相機…':'正在啟動相機…');const d=await req(`${A}/${running?'stop':'start'}`,{method:'POST'});if(d.success===false)throw Error(d.error||'Camera action failed');if(!running)setTimeout(reloadStream,250);else $('live').removeAttribute('src');message(running?'相機已停止。':'相機啟動中…','ok');await pollOnce()}catch(e){message(e.message,'err')}finally{cameraBusy=false;renderStatus(lastStatus)}}
+async function toggleCamera(){if(cameraBusy)return;if(lastStatus.recording){message('請先停止錄影。','warn');return}cameraBusy=true;preview.stop();renderStatus(lastStatus);try{const running=!!lastStatus.running;message(running?'正在停止相機…':'正在啟動相機…');const d=await req(`${A}/${running?'stop':'start'}`,{method:'POST'});if(d.success===false)throw Error(d.error||'Camera action failed');message(running?'相機已停止。':'相機啟動中…','ok');await pollOnce()}catch(e){message(e.message,'err')}finally{cameraBusy=false;renderStatus(lastStatus);reloadStream()}}
 async function snapshotCurrent(){return snapshot(effectiveLiveView())}
 async function snapshot(mode){try{const d=await req(`${A}/snapshot`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});if(!d.success)throw Error(d.error||'Snapshot failed');message(`照片已儲存： ${d.path}`,'ok');await loadMedia(true)}catch(e){message(e.message,'err')}}
 async function toggleRecording(){if(recordBusy)return;recordBusy=true;renderStatus(lastStatus);try{if(lastStatus.recording){message('正在儲存錄影…');const d=await req(`${A}/record/stop`,{method:'POST'});if(!d.success)throw Error(d.error||'Stop recording failed');message(`錄影已儲存： ${d.relative_path||d.path||''}`,'ok');recSince=null}else{const mode=$('recordMode').value;message('正在開始錄影…');const d=await req(`${A}/record/start`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});if(!d.success)throw Error(d.error||'Start recording failed');message('錄影已開始。','ok');recSince=Date.now()}await pollOnce();await loadMedia(true)}catch(e){message(e.message,'err')}finally{recordBusy=false;renderStatus(lastStatus)}}
 
 function stateClass(status){status=String(status||'').toUpperCase();if(status==='LIVE'||status==='ON'||status==='RECORDING'||status==='PASS'||status==='COMPLETE')return'good';if(status==='ERROR'||status==='ALARM')return'bad';if(status==='STARTING'||status==='STOPPING'||status==='RECONNECTING'||status==='RUNNING'||status==='PREVIEW')return'warn';return'idle'}
 function renderStatus(d={}){
-  const previousView=effectiveLiveView();lastStatus=d;
+  lastStatus=d;
   const running=!!d.running,recording=!!d.recording,ready=!!d.inference_ready,hasFrame=!!d.frame_fresh,configured=Number(d.product_id||0)>0;
   const names={STOPPED:'已停止',STARTING:'啟動中',STOPPING:'停止中',LIVE:'運作中',RECONNECTING:'重新連線中',ERROR:'異常',OFFLINE:'連線中斷'};
   const status=d.status||'STOPPED',label=names[status]||status;
@@ -311,8 +314,8 @@ function renderStatus(d={}){
   $('recBadge').style.display=recording?'inline-flex':'none';recSince=recording&&d.recording_started_at?d.recording_started_at*1000:null;
   $('recTimer').textContent=recSince?fmtDuration((Date.now()-recSince)/1000):'—';
   $('viewResult').disabled=!ready;
-  updateSnapshotLabel();if(previousView!==effectiveLiveView()&&hasFrame)reloadStream();renderLabelScores(d);
-  $('expandLive').disabled=!hasFrame&&!document.querySelector('.camera-card').classList.contains('live-expanded');
+  $('viewRaw').classList.toggle('on',viewMode==='raw');$('viewResult').classList.toggle('on',viewMode==='result');
+  updateSnapshotLabel();renderLabelScores(d);$('expandLive').disabled=!hasFrame&&!document.querySelector('.camera-card').classList.contains('live-expanded');
   const cam=$('cameraToggle');cam.disabled=cameraBusy||['STARTING','STOPPING','OFFLINE'].includes(status)||recording;
   cam.textContent=running?'■ 停止相機':'▶ 啟動相機';cam.className='action wide '+(running?'danger':'primary');$('cameraQuickState').textContent=label;
   $('cameraHint').textContent=recording?'停止錄影後，即可停止相機或套用設定。':hasFrame?'相機已就緒，可以拍照或錄影。':label;
@@ -336,7 +339,7 @@ function renderStatus(d={}){
 let alarmAudio=null,lastAlarmSeq=null;
 document.addEventListener('click',()=>{if(!alarmAudio){try{alarmAudio=new(window.AudioContext||window.webkitAudioContext)()}catch{}}if(alarmAudio?.state==='suspended')alarmAudio.resume().catch(()=>{})});
 function playAlarm(seq){if(!alarmAudio||alarmAudio.state!=='running'||lastAlarmSeq===seq)return;lastAlarmSeq=seq;const o=alarmAudio.createOscillator(),g=alarmAudio.createGain();o.frequency.value=880;g.gain.value=.12;o.connect(g);g.connect(alarmAudio.destination);o.start();o.stop(alarmAudio.currentTime+.35)}
-async function applyDefinition(){cameraBusy=true;renderStatus(lastStatus);try{const d=await req(`${A}/apply`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({product_id:lastStatus.product_id}),signal:AbortSignal.timeout(25000)});if(!d.success)throw Error(d.error);message(d.message||'已套用','ok');await pollOnce();reloadStream()}catch(e){message(e.message,'err')}finally{cameraBusy=false;renderStatus(lastStatus)}}
+async function applyDefinition(){cameraBusy=true;preview.stop();renderStatus(lastStatus);try{const d=await req(`${A}/apply`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({product_id:lastStatus.product_id}),signal:AbortSignal.timeout(25000)});if(!d.success)throw Error(d.error);message(d.message||'已套用','ok');await pollOnce();reloadStream()}catch(e){message(e.message,'err')}finally{cameraBusy=false;renderStatus(lastStatus);reloadStream()}}
 
 function stateLabel(s){return({PENDING:'等待',DETECTING:'辨識中',DONE:'完成',TIMEOUT:'逾時'})[s]||s}
 function nodeClass(x,sop){const s=String(x.status||'PENDING').toUpperCase(),cur=Number(x.id)===Number(sop?.current_step_id||0);return `${s==='DONE'?'done':s==='TIMEOUT'?'alarm':''} ${cur&&s==='PENDING'?'current':''}`}
@@ -374,11 +377,11 @@ async function loadConfig(showToast=false){
 }
 async function loadProducts(){try{const rows=await req('/api/products');const sel=$('product'),old=sel.value;sel.innerHTML='<option value="0">不選產品，僅相機預覽</option>'+rows.map(x=>`<option data-i18n-skip value="${x.id}">${esc(x.serial||'Product '+x.id)}${x.name?' · '+esc(x.name):''}</option>`).join('');sel.value=old||'0';$('setupGuide').style.display=rows.length?'none':'flex';updateAiFields()}catch(e){message('Product list: '+e.message,'warn')}}
 async function applySettings(){
-  if(settingsBusy||!settingsDirty)return;if(lastStatus.recording){message('請先停止錄影再套用設定。','warn');return}settingsBusy=true;updateSettingsActionState();
-  try{const res=String($('resolution').value).split('x'),width=Number(res[0]),height=Number(res[1]);if(!width||!height)throw Error('Invalid resolution selection');const data={restart:!!lastStatus.running,backend:$('backend').value,source:$('source').value,camera:Number($('camera').value),rotation:Number($('rotation').value),width,height,infer_fps:Number($('infer_fps').value),recording_bitrate:Number($('recording_bitrate').value),min_free_mb:Number($('min_free_mb').value),ldc:$('ldc').checked,product_id:Number($('product').value)};const wasRunning=!!lastStatus.running;const d=await req(`${A}/config`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});if(!d.success)throw Error(d.error||'Apply failed');message(wasRunning?'設定已儲存，相機重新啟動中…':'設定已儲存。','ok');if(wasRunning)setTimeout(reloadStream,700);await pollOnce();await loadConfig(false)}catch(e){message(e.message,'err')}finally{settingsBusy=false;updateSettingsActionState()}
+  if(settingsBusy||!settingsDirty)return;if(lastStatus.recording){message('請先停止錄影再套用設定。','warn');return}settingsBusy=true;preview.stop();updateSettingsActionState();
+  try{const res=String($('resolution').value).split('x'),width=Number(res[0]),height=Number(res[1]);if(!width||!height)throw Error('Invalid resolution selection');const data={restart:!!lastStatus.running,backend:$('backend').value,source:$('source').value,camera:Number($('camera').value),rotation:Number($('rotation').value),width,height,infer_fps:Number($('infer_fps').value),recording_bitrate:Number($('recording_bitrate').value),min_free_mb:Number($('min_free_mb').value),ldc:$('ldc').checked,product_id:Number($('product').value)};const wasRunning=!!lastStatus.running;const d=await req(`${A}/config`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});if(!d.success)throw Error(d.error||'Apply failed');message(wasRunning?'設定已儲存，相機重新啟動中…':'設定已儲存。','ok');await pollOnce();await loadConfig(false)}catch(e){message(e.message,'err')}finally{settingsBusy=false;updateSettingsActionState();reloadStream()}
 }
 
-async function pollOnce(){try{const d=await req(`${A}/status?t=${Date.now()}`),wasRunning=!!lastStatus.running;renderStatus(d);if(d.running&&!wasRunning)reloadStream();if(Number(d.media_version??-1)!==mediaVersion||(d.recording&&Date.now()-lastMediaRefresh>2500))loadMedia(false)}catch(e){renderStatus({...lastStatus,status:'OFFLINE',running:false,frame_fresh:false,inference_ready:false,sop:null,error:'與設備連線中斷，畫面及檢測結果已停用。'});$('live').removeAttribute('src')}}
+async function pollOnce(){try{const d=await req(`${A}/status?t=${Date.now()}`);renderStatus(d);reloadStream();if(Number(d.media_version??-1)!==mediaVersion||(d.recording&&Date.now()-lastMediaRefresh>2500))loadMedia(false)}catch(e){renderStatus({...lastStatus,status:'OFFLINE',running:false,frame_fresh:false,inference_ready:false,sop:null,error:'與設備連線中斷，畫面及檢測結果已停用。'});preview.stop()}}
 async function pollLoop(){await pollOnce();setTimeout(pollLoop,800)}
 setInterval(()=>{if(lastStatus.recording&&recSince)$('recTimer').textContent=fmtDuration((Date.now()-recSince)/1000)},500);
 window.addEventListener('beforeunload',e=>{if(settingsDirty){e.preventDefault();e.returnValue=''}});
@@ -386,6 +389,6 @@ for(const evt of ['change','input'])document.addEventListener(evt,e=>{if(e.targe
 (async()=>{await loadProducts();await loadConfig(false);await loadMedia(true);await pollOnce();updateSnapshotLabel();if(lastStatus.running)reloadStream();pollLoop()})().catch(e=>message(e.message,'err'));
 </script>
 <script src="/static/inspection.js"></script>
-<script src="/static/packaging_operator.js?v=2.4.8"></script>
+<script src="/static/packaging_operator.js?v=2.4.5"></script>
 </body>
 </html>

@@ -75,11 +75,20 @@ def main():
             wait(lambda:rt.status()['definition_pending'])
             assert not rt.status()['inference_ready']
             assert not rt.snapshot('result')['success']
+            backend_before_apply = rt.backend
+            thread_before_apply = rt.thread
             applied=client.post('/api/edge/apply',json={'product_id':pid})
             assert applied.status_code==200,applied.json
             wait(lambda:rt.status()['inference_ready'])
+            assert rt.backend is backend_before_apply and rt.thread is thread_before_apply
             assert rt.engine.steps_cfg[0]['name']=='New definition'
             assert not rt.definition_pending
+            switched=client.post('/api/edge/apply',json={'product_id':other})
+            assert switched.status_code==200,switched.json
+            assert rt.cfg.product_id==other and rt.backend is backend_before_apply
+            restored=client.post('/api/edge/apply',json={'product_id':pid})
+            assert restored.status_code==200,restored.json
+            assert rt.cfg.product_id==pid and rt.backend is backend_before_apply
             assert rt.stop()['success']
             assert not rt.status()['has_raw'] and not rt.snapshot('raw')['success']
             assert client.get(f'/api/edge/template-frame?product_id={pid}').status_code==409

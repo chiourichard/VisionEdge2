@@ -1,6 +1,6 @@
-# VisionEdge 2.3.1
+# VisionEdge 2.3.0
 
-本版新增精細標記縮放，操作見 [RELEASE_2.3.1_ZH.md](RELEASE_2.3.1_ZH.md)。完整教學手冊在 docs 目錄。
+Jetson Orin Nano Super 與 Logitech BRIO 部署方式：[JETSON_DEPLOYMENT_ZH.md](JETSON_DEPLOYMENT_ZH.md)。
 
 本版影像包裝循環設定與更新注意事項：[RELEASE_2.3_ZH.md](RELEASE_2.3_ZH.md)。
 

@@ -18,6 +18,10 @@ def main():
   body=dict(version=initial['version'],image_b64=image,regions=regions,new_capture_groups={'frame1':dict(label='original',thumb_b64=image)})
   res=c.put(url,json=body);assert res.status_code==200,res.json
   saved=c.get(url).json;assert len(saved['regions'])==2 and len(saved['captures'])==1 and saved['image_b64']==image
+  compact=c.get(url+'?compact=1').json
+  assert compact['version']==saved['version'] and compact['image_b64'] is None
+  assert compact['captures'][0]['thumb_b64']==image
+  assert all((r['source_width'],r['source_height'])==(120,80) for r in saved['regions'])
   assert all(r['capture_group_id']==saved['captures'][0]['id'] for r in saved['regions'])
   assert c.get(f'/api/products/{p}/sop-definition').json['steps']==[]
   rid=saved['regions'][0]['id']
@@ -37,8 +41,22 @@ def main():
   assert after['regions'][0]['template_b64']==saved['regions'][0]['template_b64'],'Other displayed frame must not recrop stored label'
   assert after['captures'][0]['thumb_b64']==image
   assert c.get(f'/api/products/{p}/sop-definition').json['steps'][0]['samples'][0]['threshold']==0
+  own_sample=c.get(f'/api/products/{p}/sop-definition').json['steps'][0]['samples'][0]
+  assert (own_sample['source_width'],own_sample['source_height'])==(120,80)
   foreign_now=c.get(f'/api/products/{q}/sop-definition').json
   assert foreign_now['steps'][0]['samples'][0]['threshold']==.8
+
+  enlarged=base.cv2.resize(frame,(240,160))
+  recapture_regions=[dict(r) for r in after['regions']]
+  recapture_regions[0].update(x=20,y=20,w=40,h=40,source_image_b64=base.cv2_to_b64(enlarged))
+  recapture=c.put(url,json=dict(version=after['version'],regions=recapture_regions))
+  assert recapture.status_code==200,recapture.json
+  recaptured=c.get(url).json
+  own_sample=c.get(f'/api/products/{p}/sop-definition').json['steps'][0]['samples'][0]
+  assert (own_sample['source_width'],own_sample['source_height'])==(240,160)
+  assert (recaptured['regions'][0]['source_width'],recaptured['regions'][0]['source_height'])==(240,160)
+  foreign_sample=c.get(f'/api/products/{q}/sop-definition').json['steps'][0]['samples'][0]
+  assert (foreign_sample['source_width'],foreign_sample['source_height'])==(120,80)
   # Saving another field in the importing flow must not silently reimport source changes.
   smp=foreign['steps'][0]['samples'][0]
   res=c.post(f'/api/products/{q}/sop-definition',json=dict(config={'enabled':False},steps=[dict(name='renamed group',samples=[dict(existing_sample_id=smp['id'],source_region_id=rid,sample_role='OK')])]))
@@ -48,12 +66,12 @@ def main():
   c.post(f'/api/products/{q}/sop-definition',json=dict(config={'enabled':False},steps=[dict(name='group',samples=[dict(source_region_id=rid,sample_role='OK')])]))
   assert c.get(f'/api/products/{q}/sop-definition').json['steps'][0]['samples'][0]['threshold']==0
   assert c.put(url,json=body).status_code==409,'Stale batch must fail'
-  bad=dict(version=after['version'],regions=after['regions']);bad['regions'][1]['threshold']=float('nan')
+  bad=dict(version=recaptured['version'],regions=recaptured['regions']);bad['regions'][1]['threshold']=float('nan')
   assert c.put(url,json=bad).status_code==400
-  assert c.get(url).json['version']==after['version'],'Invalid batch must be atomic'
-  assert c.put(url,json=dict(version=after['version'],regions=[],clear_reference=True)).status_code==409,'Own rule reference deletion must fail'
+  assert c.get(url).json['version']==recaptured['version'],'Invalid batch must be atomic'
+  assert c.put(url,json=dict(version=recaptured['version'],regions=[],clear_reference=True)).status_code==409,'Own rule reference deletion must fail'
   c.post(f'/api/products/{p}/sop-definition',json=dict(config={'enabled':False},steps=[]))
-  assert c.put(url,json=dict(version=after['version'],regions=[],clear_reference=True)).status_code==200
+  assert c.put(url,json=dict(version=recaptured['version'],regions=[],clear_reference=True)).status_code==200
   assert not c.get(url).json['image_b64'],'Clear must remove reference image'
   assert c.get(url).json['captures']==[],'Orphan frames must be removed with final region'
   db=base.get_db()

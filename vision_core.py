@@ -96,6 +96,7 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+from template_matching import TemplateMatcher
 
 # ──────────────────────────────────────────────────────────────────
 # Logging
@@ -206,6 +207,8 @@ def ensure_rule_schema(db_path: str) -> None:
                 threshold         REAL DEFAULT 0.8,
                 search_margin     INTEGER DEFAULT 0,
                 template_b64      TEXT,
+                source_width      INTEGER NOT NULL DEFAULT 0,
+                source_height     INTEGER NOT NULL DEFAULT 0,
                 enabled           INTEGER NOT NULL DEFAULT 1,
                 sort_order        INTEGER NOT NULL DEFAULT 0,
                 created_at        TEXT DEFAULT (datetime('now','localtime'))
@@ -219,6 +222,9 @@ def ensure_rule_schema(db_path: str) -> None:
             conn.execute("UPDATE inspection_item_templates SET sample_role='OK' WHERE sample_role IS NULL OR sample_role=''")
         except Exception:
             pass
+        for col in ('source_width', 'source_height'):
+            if col not in {row['name'] for row in conn.execute('PRAGMA table_info(inspection_item_templates)')}:
+                conn.execute(f'ALTER TABLE inspection_item_templates ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0')
         conn.execute('''
             CREATE TABLE IF NOT EXISTS product_inference_settings (
                 product_id        INTEGER PRIMARY KEY,
@@ -321,7 +327,7 @@ def load_runtime_inspection_items(db_path: str, product_id: int) -> List[Dict]:
         out = []
         for item in items:
             samples = conn.execute('''
-                SELECT id, item_id, sample_name, COALESCE(sample_role, 'OK') AS sample_role, source_product_id, source_region_id, x, y, w, h, threshold, search_margin, template_b64, sort_order
+                SELECT id, item_id, sample_name, COALESCE(sample_role, 'OK') AS sample_role, source_product_id, source_region_id, x, y, w, h, threshold, search_margin, template_b64, source_width, source_height, sort_order
                 FROM inspection_item_templates
                 WHERE item_id=? AND enabled=1
                 ORDER BY sort_order, id
@@ -359,6 +365,56 @@ def load_runtime_inspection_items(db_path: str, product_id: int) -> List[Dict]:
                     'samples': sample_list,
                 })
         return out
+    finally:
+        conn.close()
+
+
+def fill_template_source_sizes(db_path: str, product_id: int, regions: List[Dict],
+                               inspection_items: List[Dict]) -> None:
+    """Recover legacy source dimensions without rewriting saved coordinates."""
+    conn = get_db(db_path)
+    reference_sizes = {}
+    product_has_reference = 'reference_img_b64' in {
+        row['name'] for row in conn.execute('PRAGMA table_info(products)')}
+    region_has_size = {'source_width', 'source_height'}.issubset({
+        row['name'] for row in conn.execute('PRAGMA table_info(regions)')})
+    region_sizes = {int(r['id']): (int(r.get('source_width') or 0),
+                                  int(r.get('source_height') or 0)) for r in regions}
+
+    def reference_size(pid):
+        pid = int(pid or 0)
+        if pid not in reference_sizes:
+            row = (conn.execute('SELECT reference_img_b64 FROM products WHERE id=?', (pid,)).fetchone()
+                   if product_has_reference else None)
+            size = (0, 0)
+            if row and row['reference_img_b64']:
+                try:
+                    image = b64_to_cv2(row['reference_img_b64'])
+                    size = (image.shape[1], image.shape[0]) if image is not None else size
+                except Exception:
+                    pass
+            reference_sizes[pid] = size
+        return reference_sizes[pid]
+
+    try:
+        for reg in regions:
+            if not all(region_sizes[int(reg['id'])]):
+                reg['source_width'], reg['source_height'] = reference_size(product_id)
+                region_sizes[int(reg['id'])] = (reg['source_width'], reg['source_height'])
+        for item in inspection_items:
+            for sample in item.get('samples', []):
+                if int(sample.get('source_width') or 0) > 0 and int(sample.get('source_height') or 0) > 0:
+                    continue
+                source_id = int(sample.get('source_region_id') or 0)
+                size = region_sizes.get(source_id, (0, 0))
+                if not all(size) and source_id and region_has_size:
+                    row = conn.execute('SELECT source_width, source_height FROM regions WHERE id=?',
+                                       (source_id,)).fetchone()
+                    if row:
+                        size = (int(row['source_width'] or 0), int(row['source_height'] or 0))
+                if not all(size):
+                    size = reference_size(sample.get('source_product_id') or product_id)
+                sample['source_width'], sample['source_height'] = size
     finally:
         conn.close()
 
@@ -942,6 +998,8 @@ class TemplateCache:
                 'h':             reg['h'],
                 'threshold':     reg['threshold'],
                 'search_margin': reg.get('search_margin') or 0,
+                'source_width':  reg.get('source_width') or 0,
+                'source_height': reg.get('source_height') or 0,
                 'tpl_gray':      tpl_gray,
                 'th':            tpl_gray.shape[0],
                 'tw':            tpl_gray.shape[1],
@@ -1022,6 +1080,7 @@ class CacheManager:
             regions          = load_regions(self._db_path, self._product_id)
             rule_groups      = load_rule_groups(self._db_path, self._product_id)
             inspection_items = load_runtime_inspection_items(self._db_path, self._product_id)
+            fill_template_source_sizes(self._db_path, self._product_id, regions, inspection_items)
             final_logic_mode = load_product_final_logic_mode(self._db_path, self._product_id)
             new_cache        = TemplateCache(regions, rule_groups, inspection_items, final_logic_mode)
             new_ver = self._db_version()
@@ -1151,38 +1210,15 @@ def _evaluate_rule_groups(template_results: List[Dict], rule_groups: List[Dict])
 
 
 def _match_one_template(src_gray, sh, sw, reg: Dict, method: int) -> Dict:
-    th, tw = reg['th'], reg['tw']
-    label = reg['label']
-    thr = reg['threshold']
-    margin = reg.get('search_margin') or 0
-    ex, ey, ew, eh = reg['x'], reg['y'], reg['w'], reg['h']
-    if th > sh or tw > sw:
-        return {'id': reg['id'], 'label': label, 'score': None, 'threshold': thr, 'pass': False, 'error': '樣板大於影像'}
-    if margin > 0:
-        rx1 = max(0, ex - margin); ry1 = max(0, ey - margin)
-        rx2 = min(sw, ex + ew + margin); ry2 = min(sh, ey + eh + margin)
-        roi = src_gray[ry1:ry2, rx1:rx2]
-        offset = (rx1, ry1)
-    else:
-        roi = src_gray; offset = (0, 0)
-    if roi.shape[0] < th or roi.shape[1] < tw:
-        return {'id': reg['id'], 'label': label, 'score': None, 'threshold': thr, 'pass': False, 'error': '限定搜尋區域小於樣板，請重新設定位置'}
-    result_map = cv2.matchTemplate(roi, reg['tpl_gray'], method)
-    mn, mx, mn_loc, mx_loc = cv2.minMaxLoc(result_map)
-    if method == cv2.TM_SQDIFF_NORMED:
-        score, local_tl = 1.0 - float(mn), mn_loc
-    else:
-        score, local_tl = float(mx), mx_loc
-    tl = (local_tl[0] + offset[0], local_tl[1] + offset[1])
-    passed = score >= thr
-    return {'id': reg['id'], 'label': label, 'score': round(score, 4), 'threshold': thr, 'pass': passed,
-            'match_loc': list(tl), 'match_size': [tw, th], 'x': ex, 'y': ey, 'w': ew, 'h': eh}
+    # Kept for callers outside the Edge runtime, including older integrations.
+    return TemplateMatcher(method=method).begin_gray(src_gray).match(reg)
 
 
-def _run_multi_sample_inference(frame: np.ndarray, cache: TemplateCache, method: int, draw_vis: bool):
+def _run_multi_sample_inference(frame: np.ndarray, cache: TemplateCache, method: int,
+                                draw_vis: bool, match_frame=None):
     # Rule Groups B+: OK samples are positive acceptance templates; NG samples are hard-reject templates.
-    src_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    sh, sw = src_gray.shape[:2]
+    match_frame = match_frame or TemplateMatcher(method=method).begin(frame)
+    sh, sw = match_frame.gray.shape[:2]
     vis = frame.copy() if draw_vis else None
     sample_results: List[Dict] = []
     item_results: List[Dict] = []
@@ -1203,8 +1239,10 @@ def _run_multi_sample_inference(frame: np.ndarray, cache: TemplateCache, method:
                 'x': sample['x'], 'y': sample['y'], 'w': sample['w'], 'h': sample['h'],
                 'threshold': sample['threshold'], 'search_margin': sample.get('search_margin') or 0,
                 'tpl_gray': sample['tpl_gray'], 'th': sample['th'], 'tw': sample['tw'],
+                'source_width': sample.get('source_width') or 0,
+                'source_height': sample.get('source_height') or 0,
             }
-            r = _match_one_template(src_gray, sh, sw, reg, method)
+            r = match_frame.match(reg)
             raw_match = bool(r.get('pass'))
             r['sample_id'] = r.pop('id')
             r['item_id'] = item['id']
@@ -1213,7 +1251,7 @@ def _run_multi_sample_inference(frame: np.ndarray, cache: TemplateCache, method:
             r['reject'] = bool(role == 'NG' and raw_match)
             # For NG samples, pass=True means "not triggered". If triggered, it is a red hard reject.
             if role == 'NG':
-                r['pass'] = not raw_match
+                r['pass'] = not raw_match and not r.get('error')
                 ng_results.append(r)
                 if raw_match:
                     matched_ng.append(r)
@@ -1231,7 +1269,8 @@ def _run_multi_sample_inference(frame: np.ndarray, cache: TemplateCache, method:
         else:
             # NG-only groups are valid: pass when no NG sample is matched.
             item_ok_pass = True
-        item_pass = (not ng_hit) and item_ok_pass
+        matching_error = any(r.get('error') for r in local_results)
+        item_pass = (not ng_hit) and item_ok_pass and not matching_error
         if ng_hit:
             hard_reject = True
 
@@ -1260,12 +1299,12 @@ def _run_multi_sample_inference(frame: np.ndarray, cache: TemplateCache, method:
                         sx1 = max(0, ex - margin); sy1 = max(0, ey - margin)
                         sx2 = min(sw, ex + ew + margin); sy2 = min(sh, ey + eh + margin)
                         cv2.rectangle(vis, (sx1, sy1), (sx2, sy2), (180, 180, 60), 1)
-                    cv2.rectangle(vis, (ex, ey), (ex + ew, ey + eh), (255, 200, 0), 2)
+                    cv2.rectangle(vis, (ex, ey), (ex + ew, ey + eh), (255, 200, 0), 1)
 
                 # 2) actual best-match box: this is where template matching found the sample in the current frame.
                 if r.get('match_loc') and r.get('match_size'):
                     tl = tuple(r['match_loc']); tw, th = r['match_size']
-                    cv2.rectangle(vis, tl, (tl[0]+tw, tl[1]+th), color, 4)
+                    cv2.rectangle(vis, tl, (tl[0]+tw, tl[1]+th), color, 2)
                     text_x, text_y_base = tl[0], tl[1]
                 else:
                     # Still label the configured box if matching failed before a location could be produced.
@@ -1294,7 +1333,7 @@ def _run_multi_sample_inference(frame: np.ndarray, cache: TemplateCache, method:
                       for r in local_results]
         })
     final_logic_mode = _clean_logic_mode(getattr(cache, 'final_logic_mode', 'ALL'))
-    if hard_reject:
+    if hard_reject or any(r.get('error') for r in sample_results):
         all_pass = False
     elif item_results:
         all_pass = all(bool(x.get('pass')) for x in item_results) if final_logic_mode == 'ALL' else any(bool(x.get('pass')) for x in item_results)
@@ -1323,64 +1362,45 @@ def run_inference(
     cache: TemplateCache,
     method: int = cv2.TM_CCOEFF_NORMED,
     draw_vis: bool = True,
+    match_frame=None,
 ) -> Tuple[bool, List[Dict], Optional[np.ndarray]]:
+    match_frame = match_frame or TemplateMatcher(method=method).begin(frame)
     if getattr(cache, 'inspection_items', None):
         cache.last_inference_mode = 'multi_sample'
-        return _run_multi_sample_inference(frame, cache, method, draw_vis)
-    src_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    sh, sw   = src_gray.shape[:2]
+        return _run_multi_sample_inference(frame, cache, method, draw_vis, match_frame)
+    sh, sw = match_frame.gray.shape[:2]
     results  = []
     vis      = frame.copy() if draw_vis else None
 
     for reg in cache.regions:
-        th, tw = reg['th'], reg['tw']
         label  = reg['label']
-        thr    = reg['threshold']
-        margin = reg['search_margin']
-        ex, ey, ew, eh = reg['x'], reg['y'], reg['w'], reg['h']
 
-        if th > sh or tw > sw:
-            results.append({'id': reg['id'], 'label': label,
-                            'score': None, 'threshold': thr, 'pass': False, 'error': '樣板大於影像'})
+        r = match_frame.match(reg, small_roi_fallback=True)
+        if r['score'] is None:
+            results.append(r)
             continue
+        score = r['score']
+        tl = tuple(r['match_loc'])
+        passed = r['pass']
+        tw, th = r['match_size']
+        margin = r['search_margin']
+        ex, ey, ew, eh = r['x'], r['y'], r['w'], r['h']
 
-        if margin > 0:
+        if margin > 0 and vis is not None:
             rx1 = max(0, ex - margin); ry1 = max(0, ey - margin)
             rx2 = min(sw, ex + ew + margin); ry2 = min(sh, ey + eh + margin)
-            roi = src_gray[ry1:ry2, rx1:rx2]
-            offset = (rx1, ry1)
-            if vis is not None:
-                cv2.rectangle(vis, (rx1, ry1), (rx2, ry2), (180, 180, 60), 1)
-        else:
-            roi = src_gray; offset = (0, 0)
-
-        if roi.shape[0] < th or roi.shape[1] < tw:
-            roi = src_gray; offset = (0, 0)
-
-        result_map = cv2.matchTemplate(roi, reg['tpl_gray'], method)
-        mn, mx, mn_loc, mx_loc = cv2.minMaxLoc(result_map)
-
-        if method == cv2.TM_SQDIFF_NORMED:
-            score, local_tl = 1.0 - float(mn), mn_loc
-        else:
-            score, local_tl = float(mx), mx_loc
-
-        tl     = (local_tl[0] + offset[0], local_tl[1] + offset[1])
-        passed = score >= thr
+            cv2.rectangle(vis, (rx1, ry1), (rx2, ry2), (180, 180, 60), 1)
 
         if vis is not None:
             color = (0, 255, 80) if passed else (0, 60, 255)
-            cv2.rectangle(vis, tl, (tl[0]+tw, tl[1]+th), color, 4)
+            cv2.rectangle(vis, tl, (tl[0]+tw, tl[1]+th), color, 2)
             cv2.putText(vis, f'{label} {score:.3f}',
                         (tl[0], max(tl[1]-6, 12)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
-            cv2.rectangle(vis, (ex, ey), (ex+ew, ey+eh), (255, 200, 0), 2)
+            cv2.rectangle(vis, (ex, ey), (ex+ew, ey+eh), (255, 200, 0), 1)
 
-        results.append({
-            'id': reg['id'], 'label': label,
-            'score': round(score, 4), 'threshold': thr, 'pass': passed,
-            'match_loc': list(tl), 'match_size': [tw, th],
-        })
+        results.append({key: r[key] for key in
+                        ('id', 'label', 'score', 'threshold', 'pass', 'match_loc', 'match_size')})
 
     all_pass, rule_results = _evaluate_rule_groups(results, cache.rule_groups)
     if rule_results:
