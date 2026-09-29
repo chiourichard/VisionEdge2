@@ -25,7 +25,8 @@ def test_database_save():
     conn.executescript('''
     CREATE TABLE products(id INTEGER PRIMARY KEY, serial TEXT, name TEXT);
     CREATE TABLE regions(id INTEGER PRIMARY KEY, product_id INTEGER, label TEXT,
-      x INTEGER,y INTEGER,w INTEGER,h INTEGER,threshold REAL,search_margin INTEGER,template_b64 TEXT);
+      x INTEGER,y INTEGER,w INTEGER,h INTEGER,threshold REAL,search_margin INTEGER,template_b64 TEXT,
+      source_width INTEGER DEFAULT 0,source_height INTEGER DEFAULT 0);
     CREATE TABLE inspection_items(id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER,
       name TEXT,logic_mode TEXT,enabled INTEGER,sort_order INTEGER,step_no INTEGER,required INTEGER,
       min_consecutive_hits INTEGER,hold_ms INTEGER,timeout_sec REAL,allow_out_of_order INTEGER,
@@ -33,11 +34,15 @@ def test_database_save():
     CREATE TABLE inspection_item_templates(id INTEGER PRIMARY KEY AUTOINCREMENT,item_id INTEGER,
       sample_name TEXT,sample_role TEXT,source_product_id INTEGER,source_region_id INTEGER,
       x INTEGER,y INTEGER,w INTEGER,h INTEGER,threshold REAL,search_margin INTEGER,
-      template_b64 TEXT,enabled INTEGER,sort_order INTEGER);
+      template_b64 TEXT,source_width INTEGER DEFAULT 0,source_height INTEGER DEFAULT 0,
+      enabled INTEGER,sort_order INTEGER);
     INSERT INTO products VALUES(1,'P1','Phone');
-    INSERT INTO regions VALUES(10,1,'App Home',1,2,30,40,.8,5,'AAA');
-    INSERT INTO regions VALUES(11,1,'App Pass',5,6,30,40,.85,2,'BBB');
-    INSERT INTO regions VALUES(12,1,'App Error',9,10,30,40,.9,1,'CCC');
+    INSERT INTO regions(id,product_id,label,x,y,w,h,threshold,search_margin,template_b64,source_width,source_height)
+      VALUES(10,1,'App Home',1,2,30,40,.8,5,'AAA',100,80);
+    INSERT INTO regions(id,product_id,label,x,y,w,h,threshold,search_margin,template_b64,source_width,source_height)
+      VALUES(11,1,'App Pass',5,6,30,40,.85,2,'BBB',100,80);
+    INSERT INTO regions(id,product_id,label,x,y,w,h,threshold,search_margin,template_b64,source_width,source_height)
+      VALUES(12,1,'App Error',9,10,30,40,.9,1,'CCC',100,80);
     ''')
     payload = {'steps': [
         {'name': 'Open App', 'enabled': True, 'logic_mode': 'ANY', 'samples': [

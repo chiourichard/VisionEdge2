@@ -1,0 +1,17 @@
+[project]
+name = "visionedge"
+version = "2.3.0"
+description = "VisionEdge camera inspection and packaging workflow"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "Flask>=3.0,<4",
+    "flask-cors>=4.0,<7",
+    "waitress>=3.0,<4",
+    "numpy>=1.24,<2",
+]
+
+[project.optional-dependencies]
+# For development and regression tests on a Mac or PC. Jetson uses a separately
+# built CUDA-enabled OpenCV wheel instead of the CPU-only PyPI wheel.
+cpu = ["opencv-python-headless>=4.8,<5"]

@@ -115,9 +115,21 @@ def register_inspections(app, edge, base, path):
             mgr = base.vc.CacheManager(base.DB_PATH, int(pid))
             if not mgr.initial_load() or mgr._version != revision:
                 return jsonify(error='設定已變更，請重新套用後檢測'), 409
-            prepared = base._prepare_frame(frame, product or {})
+            prepare = getattr(base, '_prepare_edge_frame', base._prepare_frame)
+            prepared = prepare(frame, product or {})
             mgr.get().snapshot_three_state = True
-            passed, results, vis = base.vc.run_inference(prepared, mgr.get(), method=edge._method(), draw_vis=True)
+            cache = mgr.get()
+            kwargs = {'method': edge._method(), 'draw_vis': True}
+            try:
+                if hasattr(base.vc, 'TemplateMatcher'):
+                    matcher = base.vc.TemplateMatcher(getattr(edge.cfg, 'inference_device', 'cpu'), edge._method())
+                    matcher.prepare([reg['tpl_gray'] for reg in cache.regions] +
+                                    [sample['tpl_gray'] for item in cache.inspection_items
+                                     for sample in item.get('samples', [])])
+                    kwargs['match_frame'] = matcher.begin(prepared)
+                passed, results, vis = base.vc.run_inference(prepared, cache, **kwargs)
+            except Exception as exc:
+                return jsonify(error=f'檢測運算失敗：{exc}'), 503
             rules = getattr(mgr.get(), 'last_rule_results', []) or []
             if mgr._db_version() != revision:
                 return jsonify(error='拍照期間設定被修改，本次未保存，請重新套用'), 409

@@ -5,8 +5,8 @@ Goals
 -----
 * One physical camera owner per process.
 * Preview, template/SOP inference, snapshot and recording can run together.
-* Qualcomm qtiqmmfsrc/v4l2h264enc is preferred on-device; OpenCV is the
-  portable development/fallback backend.
+* Qualcomm uses qtiqmmfsrc/v4l2h264enc; Jetson USB cameras use OpenCV with
+  V4L2 or GStreamer MJPEG capture and optional CUDA template matching.
 * Existing LIVE_FLOW_GRAPH_REVIEW product/template/SOP data model is reused by VisionEdge.
 
 The QTI backend uses one camera pipeline with a tee. One branch produces JPEG
@@ -24,6 +24,7 @@ import json
 import os
 import queue
 import shutil
+import sys
 import threading
 import time
 from dataclasses import dataclass, asdict
@@ -90,7 +91,10 @@ def _timestamp() -> str:
     return _dt.datetime.now().strftime('%Y-%m-%d_%H%M%S_%f')[:-3]
 
 
-def _jpeg(frame: np.ndarray, quality: int = 80) -> bytes:
+def _jpeg(frame: np.ndarray, quality: int = 80, max_width: int = 0) -> bytes:
+    if max_width and frame.shape[1] > max_width:
+        height = round(frame.shape[0] * max_width / frame.shape[1])
+        frame = cv2.resize(frame, (max_width, height), interpolation=cv2.INTER_AREA)
     ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
     if not ok:
         raise RuntimeError('JPEG encode failed')
@@ -108,6 +112,7 @@ def _decode_jpeg(data: bytes) -> Optional[np.ndarray]:
 class EdgeConfig:
     backend: str = 'auto'               # auto | qti | opencv
     source: str = '0'                   # camera index / file / URI for opencv
+    capture_mode: str = 'v4l2'          # v4l2 | gstreamer (USB MJPEG)
     camera: int = 0                     # qti camera id
     width: int = 1920
     height: int = 1080
@@ -117,20 +122,24 @@ class EdgeConfig:
     product_id: int = 0                 # 0 = preview only
     infer_fps: float = 5.0
     preview_quality: int = 80
+    preview_max_width: int = 0         # 0 = original resolution
     snapshot_quality: int = 92
-    # 0 = annotated/PC 2.5 Mbps; QTI raw 8 Mbps at 1080p / 16 Mbps at 4K.
+    # 0 = Jetson/PC H.264 2.5 Mbps; legacy QTI raw keeps resolution-based bitrate.
     recording_bitrate: int = 0
     recording_fps: float = 15.0
-    recording_max_height: int = 1080
+    recording_max_height: int = 0       # 0 = preserve legacy recording_width/height
     recording_segment_seconds: int = 600
     record_source: str = 'raw'          # raw | result; QTI HW recorder is raw
     min_free_mb: int = 10240
     reconnect_sec: float = 2.0
     loop_source: bool = True
     auto_start: bool = True
-    camera_controls_mode: str = 'safe'
-    camera_control_values: str = '{}'
     method: str = 'TM_CCOEFF_NORMED'
+    inference_device: str = 'cpu'       # cpu | cuda
+    recording_width: int = 0            # 0 = camera width
+    recording_height: int = 0           # 0 = camera height
+    camera_controls_mode: str = 'off'  # off | manual for V4L2 UVC cameras
+    camera_control_values: str = '{}'
 
     @classmethod
     def load(cls, path: Path = DEFAULT_CONFIG_PATH) -> 'EdgeConfig':
@@ -141,6 +150,9 @@ class EdgeConfig:
         sec = cp['edge'] if cp.has_section('edge') else {}
         cfg.backend = str(sec.get('backend', cfg.backend)).strip().lower()
         cfg.source = str(sec.get('source', cfg.source)).strip()
+        cfg.capture_mode = str(sec.get('capture_mode', cfg.capture_mode)).strip().lower()
+        if cfg.capture_mode not in ('v4l2', 'gstreamer'):
+            raise ValueError('capture_mode must be v4l2 or gstreamer')
         cfg.camera = _safe_int(sec.get('camera', cfg.camera), cfg.camera, 0)
         cfg.width = _safe_int(sec.get('width', cfg.width), cfg.width, 64)
         cfg.height = _safe_int(sec.get('height', cfg.height), cfg.height, 64)
@@ -150,11 +162,12 @@ class EdgeConfig:
         cfg.product_id = _safe_int(sec.get('product_id', cfg.product_id), cfg.product_id, 0)
         cfg.infer_fps = _safe_float(sec.get('infer_fps', cfg.infer_fps), cfg.infer_fps, 0.1, 30.0)
         cfg.preview_quality = _safe_int(sec.get('preview_quality', cfg.preview_quality), cfg.preview_quality, 30, 100)
+        cfg.preview_max_width = _safe_int(sec.get('preview_max_width', cfg.preview_max_width), cfg.preview_max_width, 0, 8192)
         cfg.snapshot_quality = _safe_int(sec.get('snapshot_quality', cfg.snapshot_quality), cfg.snapshot_quality, 50, 100)
         cfg.recording_bitrate = _safe_int(sec.get('recording_bitrate', cfg.recording_bitrate), cfg.recording_bitrate, 0)
         cfg.recording_fps = _safe_float(sec.get('recording_fps', cfg.recording_fps), cfg.recording_fps, 1.0, 120.0)
-        cfg.recording_max_height = _safe_int(sec.get('recording_max_height', cfg.recording_max_height), 1080, 240, 2160)
-        cfg.recording_segment_seconds = _safe_int(sec.get('recording_segment_seconds', cfg.recording_segment_seconds), 600, 60, 1800)
+        cfg.recording_max_height = _safe_int(sec.get('recording_max_height', 0), 0, 0, 2160)
+        cfg.recording_segment_seconds = _safe_int(sec.get('recording_segment_seconds', 600), 600, 60, 1800)
         cfg.record_source = str(sec.get('record_source', cfg.record_source)).strip().lower()
         cfg.record_source = cfg.record_source if cfg.record_source in ('raw', 'result') else 'raw'
         cfg.min_free_mb = _safe_int(sec.get('min_free_mb', cfg.min_free_mb), cfg.min_free_mb, 0)
@@ -162,10 +175,15 @@ class EdgeConfig:
         cfg.loop_source = _truthy(sec.get('loop_source', cfg.loop_source))
         cfg.auto_start = _truthy(sec.get('auto_start', cfg.auto_start))
         cfg.method = str(sec.get('method', cfg.method)).strip() or cfg.method
-        from qti_controls import normalize
-        mode,values=normalize(str(sec.get('camera_controls_mode','safe')),str(sec.get('camera_control_values','{}')))
-        import json
-        cfg.camera_controls_mode=mode;cfg.camera_control_values=json.dumps(values)
+        cfg.inference_device = str(sec.get('inference_device', cfg.inference_device)).strip().lower()
+        if cfg.inference_device not in ('cpu', 'cuda'):
+            raise ValueError('inference_device must be cpu or cuda')
+        cfg.recording_width = _safe_int(sec.get('recording_width', cfg.recording_width), cfg.recording_width, 0, 8192)
+        cfg.recording_height = _safe_int(sec.get('recording_height', cfg.recording_height), cfg.recording_height, 0, 8192)
+        from v4l2_controls import normalize
+        mode, values = normalize(sec.get('camera_controls_mode', 'off'), sec.get('camera_control_values', '{}'))
+        cfg.camera_controls_mode = mode
+        cfg.camera_control_values = json.dumps(values)
         return cfg
 
     def save(self, path: Path = DEFAULT_CONFIG_PATH) -> None:
@@ -186,13 +204,8 @@ class EdgeConfig:
         return asdict(self)
 
     def update(self, data: Dict[str, Any]) -> None:
-        if 'camera_controls_mode' in data or 'camera_control_values' in data:
-            from qti_controls import normalize
-            import json
-            mode,values=normalize(data.get('camera_controls_mode',self.camera_controls_mode),data.get('camera_control_values',self.camera_control_values))
-            self.camera_controls_mode=mode;self.camera_control_values=json.dumps(values)
         # Central whitelist/normalization so HTTP cannot inject arbitrary INI keys.
-        for key in ('backend', 'source', 'framerate', 'record_source', 'method'):
+        for key in ('backend', 'source', 'capture_mode', 'framerate', 'record_source', 'method', 'inference_device'):
             if key in data:
                 setattr(self, key, str(data[key]).strip())
         if 'backend' in data:
@@ -203,13 +216,30 @@ class EdgeConfig:
             self.record_source = self.record_source.lower()
             if self.record_source not in ('raw', 'result'):
                 self.record_source = 'raw'
+        if 'inference_device' in data:
+            self.inference_device = self.inference_device.lower()
+            if self.inference_device not in ('cpu', 'cuda'):
+                raise ValueError('inference_device must be cpu or cuda')
+        if 'camera_controls_mode' in data or 'camera_control_values' in data:
+            from v4l2_controls import normalize
+            mode, values = normalize(data.get('camera_controls_mode', self.camera_controls_mode),
+                                     data.get('camera_control_values', self.camera_control_values))
+            self.camera_controls_mode = mode
+            self.camera_control_values = json.dumps(values)
+        if 'capture_mode' in data:
+            self.capture_mode = self.capture_mode.lower()
+            if self.capture_mode not in ('v4l2', 'gstreamer'):
+                raise ValueError('capture_mode must be v4l2 or gstreamer')
         for key, default, lo, hi in (
             ('camera', self.camera, 0, None), ('width', self.width, 64, 8192),
             ('height', self.height, 64, 8192), ('product_id', self.product_id, 0, None),
             ('preview_quality', self.preview_quality, 30, 100),
+            ('preview_max_width', self.preview_max_width, 0, 8192),
             ('snapshot_quality', self.snapshot_quality, 50, 100),
             ('recording_bitrate', self.recording_bitrate, 0, 100_000_000),
-            ('recording_max_height', self.recording_max_height, 240, 2160),
+            ('recording_width', self.recording_width, 0, 8192),
+            ('recording_height', self.recording_height, 0, 8192),
+            ('recording_max_height', self.recording_max_height, 0, 2160),
             ('recording_segment_seconds', self.recording_segment_seconds, 60, 1800),
             ('min_free_mb', self.min_free_mb, 0, None),
         ):
@@ -261,6 +291,9 @@ class OpenCVCameraBackend(CameraBackend):
         self._is_file = False
         self._file_fps = 0.0
         self._next_deadline = 0.0
+        self._actual_size = None
+        self._capture_mode = ''
+        self.camera_controls = None
 
     def _source(self):
         src = self.cfg.source.strip()
@@ -270,19 +303,51 @@ class OpenCVCameraBackend(CameraBackend):
 
     def start(self) -> None:
         src = self._source()
-        self._is_file = isinstance(src, str) and os.path.isfile(src)
-        self.cap = cv2.VideoCapture(src)
+        is_v4l2 = sys.platform.startswith('linux') and (isinstance(src, int) or
+                    isinstance(src, str) and src.startswith(('/dev/video', '/dev/v4l/')))
+        self._is_file = isinstance(src, str) and os.path.isfile(src) and not is_v4l2
+        self._actual_size = None
+        use_gst = is_v4l2 and self.cfg.capture_mode == 'gstreamer'
+        if use_gst:
+            device = f'/dev/video{src}' if isinstance(src, int) else src
+            pipeline = (f'v4l2src device={device} ! '
+                        f'image/jpeg,width={self.cfg.width},height={self.cfg.height},'
+                        f'framerate={self.cfg.framerate} ! jpegdec ! videoconvert ! '
+                        'video/x-raw,format=BGR ! appsink drop=true max-buffers=1 sync=false')
+            self.cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+            self._capture_mode = 'gstreamer'
+        else:
+            self.cap = cv2.VideoCapture(src, cv2.CAP_V4L2) if is_v4l2 else cv2.VideoCapture(src)
+            self._capture_mode = 'v4l2' if is_v4l2 else 'default'
         if not self.cap.isOpened():
             self.cap.release()
             self.cap = None
             raise RuntimeError(f'OpenCV cannot open source: {src}')
-        try:
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception:
-            pass
-        if isinstance(src, int):
+        if not use_gst:
+            try:
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+        if is_v4l2 and not use_gst:
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg.width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg.height)
+            try:
+                numerator, denominator = self.cfg.framerate.split('/', 1)
+                self.cap.set(cv2.CAP_PROP_FPS, float(numerator) / float(denominator))
+            except (ValueError, ZeroDivisionError):
+                raise ValueError(f'invalid camera framerate: {self.cfg.framerate}')
+        elif isinstance(src, int):
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg.width)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg.height)
+        if is_v4l2:
+            from v4l2_controls import apply as apply_v4l2_controls
+            try:
+                self.camera_controls = apply_v4l2_controls(self.cfg.source,
+                    self.cfg.camera_controls_mode, self.cfg.camera_control_values)
+            except Exception as exc:
+                self.camera_controls = {'mode': self.cfg.camera_controls_mode,
+                                        'verified': False, 'errors': {'device': str(exc)}}
         if self._is_file:
             try:
                 self._file_fps = float(self.cap.get(cv2.CAP_PROP_FPS) or 0.0)
@@ -298,6 +363,7 @@ class OpenCVCameraBackend(CameraBackend):
             return None
         ok, frame = self.cap.read()
         if ok and frame is not None:
+            self._actual_size = (frame.shape[1], frame.shape[0])
             if self._is_file and self._file_fps > 0:
                 now = time.monotonic()
                 wait = self._next_deadline - now
@@ -323,7 +389,23 @@ class OpenCVCameraBackend(CameraBackend):
 
     def status(self) -> Dict[str, Any]:
         out = super().status()
-        out.update({'source': self.cfg.source, 'opened': bool(self.cap is not None and self.cap.isOpened())})
+        out.update({'source': self.cfg.source, 'capture_mode': self._capture_mode,
+                    'opened': bool(self.cap is not None and self.cap.isOpened()),
+                    'camera_controls': self.camera_controls})
+        if self.cap is not None and self.cap.isOpened():
+            fourcc = 0
+            if self._capture_mode != 'gstreamer':
+                try:
+                    fourcc = int(self.cap.get(cv2.CAP_PROP_FOURCC))
+                except (ValueError, OverflowError):
+                    pass
+            width, height = self._actual_size or (
+                int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+            out.update({'width': width, 'height': height,
+                        'fps': round(float(self.cap.get(cv2.CAP_PROP_FPS)), 2),
+                        'fourcc': 'MJPG' if self._capture_mode == 'gstreamer' else
+                                  ''.join(chr((fourcc >> (8 * i)) & 0xff) for i in range(4))})
         return out
 
 
@@ -635,8 +717,7 @@ class QtiGstCameraBackend(CameraBackend):
             self._set_if_property(camsrc, 'camera', int(self.cfg.camera))
             self._set_if_property(camsrc, 'ldc', bool(self.cfg.ldc))
             # Keep only the minimal safe control used by the QIR base path.
-            from qti_controls import apply as apply_qti_controls
-            self.camera_controls = apply_qti_controls(camsrc,self.cfg.camera_controls_mode,self.cfg.camera_control_values)
+            self._set_if_property(camsrc, 'white-balance-mode', 0)
             preview_pad = self._request_preview_pad(camsrc)
 
             camcaps.set_property(
@@ -803,41 +884,10 @@ class QtiGstCameraBackend(CameraBackend):
         if self._bus_thread and self._bus_thread.is_alive():
             self._bus_thread.join(timeout=1.0)
         self._bus_thread = None
-        self.frame_sink = None
-        self.h264_sink = None
-        self.encoder = None
-
-    def apply_controls(self, mode, values):
-        from qti_controls import normalize, apply, SPECS
-        mode, values = normalize(mode, values)
-        if mode == 'off':
-            return {'applied': False}  # Device defaults require a fresh pipeline.
-        source = self.pipeline.get_by_name('camsrc') if self.pipeline else None
-        if source is None: raise RuntimeError('QTI camera source unavailable')
-        requested = {'white_balance_mode': values.get('white_balance_mode', 0)} if mode == 'safe' else values
-        changed, old = {}, {}
-        mutable = getattr(Gst, 'PARAM_MUTABLE_PLAYING', 0)
-        for key, value in requested.items():
-            prop = SPECS[key][0]
-            spec = source.find_property(prop)
-            if spec is None: raise RuntimeError('QTI 不支援相機控制: '+key)
-            current = int(source.get_property(prop))
-            if current != value:
-                if not mutable or not int(spec.flags) & int(mutable): return {'applied': False}
-                changed[key] = value; old[key] = current
-        try:
-            report = apply(source, 'manual', changed)
-        except Exception:
-            for key, value in old.items(): source.set_property(SPECS[key][0], value)
-            raise
-        report['mode'] = mode
-        self.camera_controls = report
-        return {'applied': True, 'report': report, 'previous_values': old}
 
     def status(self) -> Dict[str, Any]:
         out = super().status()
         out.update({
-            'camera_controls': getattr(self,'camera_controls',None),
             'camera': self.cfg.camera,
             'last_error': self._last_error,
             'recording': self._recorder is not None,
@@ -878,6 +928,7 @@ class EdgeRuntime:
         self.soft_rec = SoftwareRecorder(self.cfg)
         self._recorder_state = None
         self.cache_mgr = None
+        self.matcher = None
         self.engine = None
         self.packaging = None
         self.packaging_templates = {}
@@ -944,6 +995,16 @@ class EdgeRuntime:
         self.product = product
         self.sop = self.engine.summary() if self.engine else None
         self._prepare_packaging(cache=mgr.get())
+        if hasattr(self.base.vc, 'TemplateMatcher'):
+            self.matcher = self.base.vc.TemplateMatcher(self.cfg.inference_device, self._method())
+            cache = mgr.get()
+            templates = [reg['tpl_gray'] for reg in cache.regions]
+            templates.extend(sample['tpl_gray'] for item in cache.inspection_items
+                             for sample in item.get('samples', []))
+            templates.extend(reg['tpl_gray'] for reg in self.packaging_templates.values())
+            self.matcher.prepare(templates)
+        elif self.cfg.inference_device == 'cuda':
+            raise RuntimeError('CUDA template matching is unavailable in this inference module')
         if mgr._db_version() != self.active_revision:
             raise RuntimeError('設定正在更新，請重新套用')
         self.definition_pending = False
@@ -1013,6 +1074,7 @@ class EdgeRuntime:
             except Exception:
                 pass
         self.cache_mgr = None
+        self.matcher = None
         self.engine = None
         self.product = None
         self.sop = None
@@ -1035,8 +1097,7 @@ class EdgeRuntime:
         # OpenCV only when the QTI plugin is not present at all (PC/dev hosts).
         if requested in ('auto', 'qti') and qti_available:
             try:
-                from qti_process import QtiProcessBackend
-                b = QtiProcessBackend(self.cfg)
+                b = QtiGstCameraBackend(self.cfg)
                 b.start()
                 self.actual_backend = 'qti'
                 return b
@@ -1044,7 +1105,8 @@ class EdgeRuntime:
                 self.actual_backend = 'qti'
                 hint = (
                     f'QTI camera failed to start: {exc}. '
-                    f'請確認設備端 QMMF 相機服務可用，且 camera {self.cfg.camera} 未被其他程式占用。'
+                    f'Camera {self.cfg.camera} may already be in use by another '
+                    'VisionEdge/SmartCam process or service.'
                 )
                 self.last_warning = ''
                 raise RuntimeError(hint) from exc
@@ -1125,24 +1187,8 @@ class EdgeRuntime:
         candidate = copy.deepcopy(self.cfg)
         try:
             candidate.update(data)
-        except (ValueError,TypeError,OverflowError) as exc:
-            return {'success':False,'error':str(exc)}
-        changed = {key for key in vars(candidate) if getattr(candidate,key) != getattr(self.cfg,key)}
-        controls_only = changed <= {'camera_controls_mode','camera_control_values'}
-        if was_running and self.actual_backend == 'qti' and controls_only and self.backend:
-            try:
-                applied = self.backend.apply_controls(candidate.camera_controls_mode, candidate.camera_control_values)
-                if applied.get('applied'):
-                    try: candidate.save(self.config_path)
-                    except Exception:
-                        self.backend.apply_controls('manual', applied['previous_values'])
-                        raise
-                    with self.lock:
-                        self.cfg = candidate
-                        self.soft_rec.cfg = candidate
-                    return {'success': True, 'config': candidate.public(), 'restart_required': False, 'applied_live': True}
-            except Exception as exc:
-                return {'success': False, 'error': str(exc)}
+        except ValueError as exc:
+            return {'success': False, 'error': str(exc)}
         if was_running:
             stopped = self.stop()
             if not stopped.get('success'):
@@ -1159,7 +1205,7 @@ class EdgeRuntime:
         if was_running:
             started = self.start()
             if not started.get('success'):
-                  return {**started, 'config_saved': True}
+                return started
         return {'success': True, 'config': self.cfg.public(), 'restart_required': False}
 
     @serialized_control
@@ -1183,8 +1229,7 @@ class EdgeRuntime:
                 return {'success': True, 'applied': False, 'message': '已儲存；啟動相機時生效'}
             req = {'cfg': candidate, 'done': threading.Event(), 'result': None}
             self._definition_request = req
-        # The camera thread applies the definition between frames. Never reopen
-        # a Qualcomm pipeline merely to change inspection rules or product.
+        # The camera thread swaps definitions between frames, leaving capture open.
         if req['done'].wait(10):
             return req['result']
         with self.lock:
@@ -1242,15 +1287,22 @@ class EdgeRuntime:
         cache = self.cache_mgr.get() if self.cache_mgr is not None else None
         if cache is None or not (cache.regions or cache.inspection_items):
             return frame, False, [], [], None
-        prepared = self.base._prepare_frame(frame, self.product or {})
-        frame_pass, results, vis = self.base.vc.run_inference(
-            prepared, cache, method=self._method(), draw_vis=True,
-        )
+        prepare = getattr(self.base, '_prepare_edge_frame', self.base._prepare_frame)
+        prepared = prepare(frame, self.product or {})
+        match_frame = self.matcher.begin(prepared) if self.matcher is not None else None
+        kwargs = {'method': self._method(), 'draw_vis': True}
+        if match_frame is not None:
+            kwargs['match_frame'] = match_frame
+        frame_pass, results, vis = self.base.vc.run_inference(prepared, cache, **kwargs)
         rules = getattr(cache, 'last_rule_results', []) or []
         if self.packaging:
-            gray = cv2.cvtColor(prepared, cv2.COLOR_BGR2GRAY)
-            signals = {key: bool(self.base.vc._match_one_template(gray, *gray.shape, reg, self._method()).get('pass'))
-                       for key, reg in self.packaging_templates.items()}
+            if match_frame is not None:
+                signals = {key: bool(match_frame.match(reg).get('pass'))
+                           for key, reg in self.packaging_templates.items()}
+            else:
+                gray = cv2.cvtColor(prepared, cv2.COLOR_BGR2GRAY)
+                signals = {key: bool(self.base.vc._match_one_template(gray, *gray.shape, reg, self._method()).get('pass'))
+                           for key, reg in self.packaging_templates.items()}
             sop = self.packaging.update(signals, rules, (frame, vis if vis is not None else prepared))
             frame_pass = bool(sop.get('complete'))
             if vis is not None:
@@ -1305,10 +1357,7 @@ class EdgeRuntime:
                             self.engine.interrupt(reason='SOURCE_INTERRUPTED')
                         except Exception:
                             pass
-                    # Do not repeatedly reopen a failed native QTI pipeline.
-                    if self.actual_backend == 'qti':
-                        raise RuntimeError('Qualcomm 相機影像中斷；請檢查 qmmf_recorder.service 後手動啟動相機')
-                    # File/USB OpenCV EOF may recover by reopen.
+                    # File/USB OpenCV EOF may recover by reopen; QTI errors also get a clean restart.
                     try:
                         backend.stop()
                     except Exception:
@@ -1331,13 +1380,13 @@ class EdgeRuntime:
                     self._fps_mark = now
 
                 # Raw preview is updated for every received frame.
-                raw_jpg = _jpeg(frame, self.cfg.preview_quality)
+                raw_jpg = _jpeg(frame, self.cfg.preview_quality, self.cfg.preview_max_width)
                 result_frame = self.latest_result
                 did_infer = False
                 if self.cache_mgr is not None and now >= next_infer:
                     next_infer = now + (1.0 / max(0.1, self.cfg.infer_fps))
                     result_frame, frame_pass, results, rules, sop = self._process_inference(frame)
-                    result_jpg = _jpeg(result_frame, self.cfg.preview_quality)
+                    result_jpg = _jpeg(result_frame, self.cfg.preview_quality, self.cfg.preview_max_width)
                     self._infer_frames += 1
                     if now - self._infer_mark >= 2.0:
                         self.infer_actual_fps = self._infer_frames / max(0.001, now - self._infer_mark)
@@ -1475,6 +1524,8 @@ class EdgeRuntime:
                 'error': self.last_error,
                 'warning': self.last_warning or self.soft_rec.error,
                 'backend_requested': self.cfg.backend,
+                'inference_device': self.cfg.inference_device,
+                'inference_device_active': self.matcher.device if self.matcher is not None else None,
                 'backend': self.actual_backend or backend_status.get('backend', ''),
                 'backend_status': backend_status,
                 'frame_seq': self.frame_seq,
@@ -1508,13 +1559,36 @@ class EdgeRuntime:
                 return bytes(self.latest_raw_jpeg)
             return bytes(self.latest_result_jpeg or self.latest_raw_jpeg)
 
-    def wait_jpeg(self, after_seq: int, mode: str = 'result', timeout: float = 2.0) -> Tuple[int, bytes]:
+    def preview_frame(self, mode='raw', after=None):
+        """Return one current frame and an opaque revision, never a frame queue."""
+        with self.lock:
+            now = time.time()
+            if (self.stop_event.is_set() or self.status_text != 'LIVE'
+                    or self.last_frame_at is None or now - self.last_frame_at >= 3):
+                return '', b''
+            result = str(mode).lower() != 'raw' and self.cache_mgr is not None
+            if result:
+                if (self.definition_pending or self.last_infer_at is None
+                        or now - self.last_infer_at >= max(3, 2 / max(.1, self.cfg.infer_fps))):
+                    return '', b''
+                seq, data = self.infer_seq, self.latest_result_jpeg
+            else:
+                seq, data = self.frame_seq, self.latest_raw_jpeg
+            token = f'{self.started_at}:{"result" if result else "raw"}:{seq}'
+            return token, b'' if token == after else bytes(data)
+
+    def wait_jpeg(self, after_seq, mode: str = 'result', timeout: float = 2.0):
+        deadline = time.monotonic() + timeout
         with self.frame_cond:
-            if self.frame_seq <= after_seq:
-                self.frame_cond.wait(timeout=timeout)
-            seq = self.frame_seq
-            data = self.latest_raw_jpeg if str(mode).lower() == 'raw' else (self.latest_result_jpeg or self.latest_raw_jpeg)
-            return seq, bytes(data)
+            while not self.stop_event.is_set():
+                seq, data = self.preview_frame(mode, after_seq)
+                if data:
+                    return seq, data
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self.frame_cond.wait(timeout=remaining)
+            return after_seq, b''
 
     def snapshot(self, mode: str = 'result') -> Dict[str, Any]:
         mode = str(mode or 'result').lower()
@@ -1568,14 +1642,13 @@ class EdgeRuntime:
             ok, msg = backend.start_recording(path)
             if ok:
                 self.recording_started_at = time.time()
-                self.soft_rec.error = ''
-                self.last_warning = ''
             version = self._bump_media_version() if ok else self.media_version
             return {'success': ok, 'path': f'recordings/{path.name}' if ok else '', 'mode': mode, 'hardware': True, 'error': '' if ok else msg, 'media_version': version}
         if frame is None:
             return {'success': False, 'error': 'no frame available'}
-        # The independent recorder schedules frames at configured output FPS.
-        # Camera/inference rates no longer determine the container time base.
+        # Keep a stable output rate even when the camera is still warming up.
+        # SoftwareRecorder paces frames by elapsed time, so a transient source
+        # FPS estimate must not determine the MP4 timebase.
         ok, actual = self.soft_rec.start(frame, path, mode)
         if ok:
             self.recording_started_at = self.soft_rec.started_at
@@ -1586,8 +1659,8 @@ class EdgeRuntime:
             'success': ok,
             'path': f'recordings/{actual_path.name}' if actual_path else '',
             'mode': mode,
-            'hardware': self.soft_rec.encoder == 'GStreamer/v4l2h264enc',
-            'encoder': self.soft_rec.encoder,
+            'hardware': False,
+            'encoder': 'libx264',
             'segment_seconds': self.cfg.recording_segment_seconds,
             'error': '' if ok else actual,
             'media_version': version,

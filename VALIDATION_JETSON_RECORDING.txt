@@ -1,0 +1,18 @@
+Host validation (Windows, synthetic camera inputs, FFmpeg 7.1):
+PASS long_recording_test.py: H.264 decode, segmentation, playback duration, settings, encoder failure, low space, stale input.
+PASS long_recording_api_test.py: annotated recording, media/download/delete guards, failure state and revisions.
+PASS jetson_recording_compat_test.py: preserved CUDA/BRIO/preview configuration, legacy dimensions and aspect ratio, explicit resolution override, libx264 selection.
+PASS edge_smoke_test.py, edge_consistency_test.py, preview_backpressure_test.py,
+resolution_matching_test.py, product_switch_regression_test.py, v4l2_controls_test.py,
+i18n_static_test.py, long_recording_ui_test.js, preview_lifecycle_test.js, notice_ui_test.js.
+PASS check_recording_env.py using the host FFmpeg/libx264.
+
+Byte comparisons confirm template_matching.py, vision_core.py, v4l2_controls.py,
+server.py, workspace_api.py, inspection_history.py, latest_preview.js, camera_settings.js,
+notice.js, live_detail.js, pyproject.toml, uv.lock, run_edge.sh and config/edge.ini are unchanged.
+AST comparisons confirm the OpenCV camera backend, inference preparation/processing
+and preview_frame implementation are unchanged.
+
+No physical Jetson/BRIO/CUDA benchmark or 12/24-hour soak test was performed.
+The full TLS regression was not run because private certificates were deliberately not extracted.
+No databases, recordings or credentials from the attachment were used in testing or packaged.

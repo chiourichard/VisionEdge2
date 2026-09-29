@@ -30,33 +30,22 @@ def mp4_complete(path):
 
 
 def main():
-    use_gst = sys.platform.startswith('linux') and bool(shutil.which('gst-inspect-1.0'))
     ffmpeg = shutil.which('ffmpeg')
-    if not use_gst and not ffmpeg:
-        print('FAIL: Neither the OELinux GStreamer path nor FFmpeg is available in this environment.')
+    if not ffmpeg:
+        print('FAIL: Jetson Orin Nano requires FFmpeg with libx264 in the VisionEdge service PATH.')
         return 1
     with tempfile.TemporaryDirectory(prefix='visionedge-record-check-') as temporary:
         root = Path(temporary)
         pattern, manifest = root/'check_%06d.mp4.part', root/'closed.csv'
-        if use_gst:
-            worker = Path(__file__).with_name('gst_record_worker.py')
-            if not worker.exists():
-                print('FAIL: Extract gst_record_worker.py beside this script.')
-                return 1
-            command = [sys.executable, '-u', str(worker), '--width', '640', '--height', '360',
-                       '--fps', '15', '--bitrate', '2500000', '--segment', '1',
-                       '--pattern', str(pattern), '--manifest', str(manifest)]
-            print('Testing GStreamer appsrc -> BGR/NV12 -> v4l2h264enc -> splitmuxsink/mp4mux')
-        else:
-            command = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-filter_threads', '1',
-                       '-f', 'rawvideo', '-pixel_format', 'bgr24', '-video_size', '640x360', '-framerate', '15',
-                       '-i', 'pipe:0', '-map', '0:v:0', '-an', '-c:v', 'libx264', '-preset', 'veryfast',
-                       '-tune', 'zerolatency', '-threads', '2', '-pix_fmt', 'yuv420p', '-b:v', '2500000',
-                       '-maxrate', '2500000', '-bufsize', '5000000', '-g', '15', '-sc_threshold', '0',
-                       '-force_key_frames', 'expr:gte(t,n_forced*1)', '-f', 'segment', '-segment_format', 'mp4',
-                       '-segment_time', '1', '-reset_timestamps', '1', '-segment_list', str(manifest),
-                       '-segment_list_type', 'csv', str(pattern)]
-            print('Testing FFmpeg/libx264:', ffmpeg)
+        command = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-filter_threads', '1',
+                   '-f', 'rawvideo', '-pixel_format', 'bgr24', '-video_size', '640x360', '-framerate', '15',
+                   '-i', 'pipe:0', '-map', '0:v:0', '-an', '-c:v', 'libx264', '-preset', 'veryfast',
+                   '-tune', 'zerolatency', '-threads', '2', '-pix_fmt', 'yuv420p', '-b:v', '2500000',
+                   '-maxrate', '2500000', '-bufsize', '5000000', '-g', '15', '-sc_threshold', '0',
+                   '-force_key_frames', 'expr:gte(t,n_forced*1)', '-f', 'segment', '-segment_format', 'mp4',
+                   '-segment_time', '1', '-reset_timestamps', '1', '-segment_list', str(manifest),
+                   '-segment_list_type', 'csv', str(pattern)]
+        print('Testing FFmpeg/libx264:', ffmpeg)
         # Bounded memory; no camera, installation, service restart or network.
         errors = []
         with tempfile.TemporaryFile() as log:
@@ -97,7 +86,7 @@ def main():
             print(diagnostic[-8000:])
             return 1
         print(f'PASS: H.264 encoding and {len(clips)} closed MP4 fragments verified.')
-        print('No FFmpeg required for the OELinux GStreamer path.' if use_gst else 'Portable FFmpeg path verified.')
+        print('Jetson/PC software H.264 path verified; no NVENC is required.')
         print('Camera coexistence, 1080p load and 12/24-hour stability still require on-device testing.')
         return 0
 

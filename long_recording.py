@@ -1,7 +1,7 @@
 """Bounded, independent H.264 encoding for annotated / portable recording.
 
-An isolated GStreamer (OELinux) or FFmpeg (portable) process owns encoding
-and keyframe-aligned segmentation. Frames are scheduled
+An isolated FFmpeg/libx264 process owns encoding and keyframe-aligned segmentation.
+Jetson Orin Nano has no hardware NVENC; CUDA inference is independent. Frames are scheduled
 against a monotonic clock; the latest *complete* inference image is repeated
 between inferences (old boxes are never drawn onto a different camera image).
 There is no unbounded queue and no silent codec fallback.
@@ -12,7 +12,6 @@ import collections
 import datetime
 import shutil
 import subprocess
-import sys
 import threading
 import time
 import uuid
@@ -81,10 +80,10 @@ class H264Recorder:
             return False, 'recording already active'
         if getattr(self, 'watchdog', None):
             self.watchdog.join(timeout=1)
-        use_gst = sys.platform.startswith('linux') and bool(shutil.which('gst-inspect-1.0'))
-        executable = shutil.which('ffmpeg') if not use_gst else None
-        self.encoder = 'GStreamer/v4l2h264enc' if use_gst else 'libx264'
-        if not use_gst and not executable:
+        # Orin Nano has no NVENC. CUDA/GStreamer capture must not select a hardware encoder.
+        executable = shutil.which('ffmpeg')
+        self.encoder = 'libx264'
+        if not executable:
             return False, '長時間錄影需要 FFmpeg（含 libx264）；請由設備管理員安裝後重試。'
         self.mode = mode
         self.folder = Path(path).parent
@@ -101,7 +100,10 @@ class H264Recorder:
         self.last_scan = 0
         self.fps = float(self.cfg.recording_fps)
         h, w = frame.shape[:2]
-        scale = min(1., self.cfg.recording_max_height / h)
+        if self.cfg.recording_max_height:
+            scale = min(1., self.cfg.recording_max_height / h)
+        else:
+            scale = min(1., (self.cfg.recording_width or w) / w, (self.cfg.recording_height or h) / h)
         self.size = (max(2, int(w * scale) // 2 * 2), max(2, int(h * scale) // 2 * 2))
         bitrate = int(self.cfg.recording_bitrate or 2_500_000)
         segment = int(self.cfg.recording_segment_seconds)
@@ -121,11 +123,6 @@ class H264Recorder:
                    '-f', 'segment', '-segment_format', 'mp4', '-segment_time', str(segment),
                    '-reset_timestamps', '1', '-segment_list', str(self.manifest),
                    '-segment_list_type', 'csv', str(pattern)]
-        if use_gst:
-            command = [sys.executable, '-u', str(Path(__file__).with_name('gst_record_worker.py')),
-                       '--width', str(self.size[0]), '--height', str(self.size[1]),
-                       '--fps', str(self.fps), '--bitrate', str(bitrate), '--segment', str(segment),
-                       '--pattern', str(pattern), '--manifest', str(self.manifest)]
         try:
             self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                             stderr=subprocess.PIPE, bufsize=0,

@@ -82,7 +82,7 @@ def main():
     assert defaults.recording_bitrate == 0
     assert defaults.min_free_mb == 10240
 
-    # Software recording accepts measured source FPS instead of forcing 30 FPS.
+    # The recorder honors an explicit FPS override when used directly.
     with tempfile.TemporaryDirectory(prefix='visionedge-rec-fps-') as rd:
         rec = SoftwareRecorder(defaults)
         frame = np.zeros((120, 160, 3), np.uint8)
@@ -90,7 +90,7 @@ def main():
         assert ok, out
         for _ in range(8): rec.write(frame, frame)
         stopped = rec.stop()
-        assert stopped['success'] and abs(float(stopped.get('fps', 0)) - 24.0) < 0.01, stopped
+        assert stopped['success'] and abs(float(stopped.get('fps', 0)) - defaults.recording_fps) < 0.01, stopped
 
     # UI regression checks for the edge.5 interaction model.
     ui = (root/'static/edge_dashboard.html').read_text(encoding='utf-8')
@@ -103,7 +103,7 @@ def main():
     assert 'id="framerate"' not in ui
     assert '檢測速度' in ui
     assert '標準 · 每秒 5 次（建議）' in ui
-    assert '自動（建議）' in ui
+    assert '自動（2.5 Mbps）' in ui
     assert '保留 10 GB（建議）' in ui
     assert '影像更新率' in ui and '檢測更新率' in ui
     assert 'Frame Seq</span>' not in ui
@@ -121,7 +121,7 @@ def main():
     print('Config save preserves HTTPS [server]: PASS')
     print('UI navigation + operator-safe settings: PASS')
     print('Edge defaults (30 camera / 5 AI / auto bitrate / 10 GB reserve): PASS')
-    print('Measured-FPS software recording: PASS')
+    print('Software recording FPS override: PASS')
 
 
 if __name__ == '__main__':

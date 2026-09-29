@@ -162,6 +162,8 @@ def init_db():
             search_margin INTEGER DEFAULT 0,
             sample_hint   TEXT NOT NULL DEFAULT 'OK',
             template_b64  TEXT,
+            source_width  INTEGER NOT NULL DEFAULT 0,
+            source_height INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
         )
     ''')
@@ -183,6 +185,9 @@ def init_db():
         conn.commit()
     except Exception:
         pass  # column already exists
+    for col in ('source_width', 'source_height'):
+        if col not in {row['name'] for row in c.execute('PRAGMA table_info(regions)')}:
+            c.execute(f'ALTER TABLE regions ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0')
     try:
         c.execute("UPDATE regions SET sample_hint='OK' WHERE sample_hint IS NULL OR sample_hint=''")
         conn.commit()
@@ -290,6 +295,8 @@ def init_db():
             threshold         REAL DEFAULT 0.8,
             search_margin     INTEGER DEFAULT 0,
             template_b64      TEXT,
+            source_width      INTEGER NOT NULL DEFAULT 0,
+            source_height     INTEGER NOT NULL DEFAULT 0,
             enabled           INTEGER NOT NULL DEFAULT 1,
             sort_order        INTEGER NOT NULL DEFAULT 0,
             created_at        TEXT DEFAULT (datetime('now','localtime')),
@@ -307,6 +314,9 @@ def init_db():
         conn.commit()
     except Exception:
         pass
+    for col in ('source_width', 'source_height'):
+        if col not in {row['name'] for row in c.execute('PRAGMA table_info(inspection_item_templates)')}:
+            c.execute(f'ALTER TABLE inspection_item_templates ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0')
 
     # SOP Flow v1: reuse inspection_items as ordered, time-latched SOP steps.
     # Existing rule-group behavior remains compatible because every added column has a safe default.
@@ -554,11 +564,54 @@ def update_product(pid):
 
 @app.route('/api/products/<int:pid>', methods=['DELETE'])
 def delete_product(pid):
-    conn = get_db()
-    conn.execute('DELETE FROM products WHERE id=?', (pid,))
-    conn.commit()
-    conn.close()
-    return jsonify({'ok': True})
+    """Delete an idle product while preserving independent imported sample copies."""
+    from contextlib import nullcontext
+
+    edge = app.extensions.get('visionedge_runtime')
+    control = getattr(edge, 'control_lock', nullcontext())
+    with control:
+        conn = get_db()
+        previous_product_id = None
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            if not conn.execute('SELECT 1 FROM products WHERE id=?', (pid,)).fetchone():
+                return jsonify({'error': '產品不存在'}), 404
+            linked = conn.execute('''
+                SELECT 1 FROM inspection_rule_items t
+                JOIN inspection_rules i ON i.id=t.rule_id
+                JOIN regions r ON r.id=t.region_id
+                WHERE r.product_id=? AND i.product_id<>? LIMIT 1
+            ''', (pid, pid)).fetchone()
+            if linked:
+                return jsonify({'error': '其他產品的規則仍引用此產品的 Label，請先移除引用再刪除'}), 409
+
+            if edge is not None and int(edge.cfg.product_id or 0) == pid:
+                status = edge.status()
+                if (status.get('running') or status.get('recording')
+                        or getattr(edge, 'inspection_active', lambda: False)()
+                        or (getattr(edge, 'packaging', None) and edge.packaging.cycle_id)):
+                    return jsonify({'error': '此產品正在使用中，請先結束檢測並停止相機，或切換檢測產品，再刪除'}), 409
+                result = edge.update_config({'product_id': 0})
+                if not result.get('success'):
+                    return jsonify({'error': result.get('error', '無法解除目前選用產品')}), 409
+                previous_product_id = pid
+
+            conn.execute('DELETE FROM products WHERE id=?', (pid,))
+            conn.commit()
+            return jsonify({'ok': True})
+        except Exception:
+            conn.rollback()
+            if previous_product_id is not None:
+                try:
+                    restore = edge.update_config({'product_id': previous_product_id})
+                    if not restore.get('success'):
+                        app.logger.error('failed to restore selected product after delete failure: %s', restore)
+                except Exception:
+                    app.logger.exception('failed to restore selected product after delete failure')
+            app.logger.exception('delete product failed')
+            return jsonify({'error': '刪除產品失敗，請重新載入後確認狀態'}), 500
+        finally:
+            conn.close()
 
 
 # ──────────────────────────────────────────────
@@ -584,7 +637,7 @@ def get_refimg(pid):
 def list_regions(pid):
     conn = get_db()
     rows = conn.execute(
-        "SELECT id,product_id,label,x,y,w,h,threshold,search_margin,capture_group_id,"
+        "SELECT id,product_id,label,x,y,w,h,threshold,search_margin,source_width,source_height,capture_group_id,"
         "COALESCE(sample_hint, 'OK') AS sample_hint FROM regions WHERE product_id=?", (pid,)
     ).fetchall()
     conn.close()
@@ -794,6 +847,7 @@ def _sync_product_regions(conn, pid, data):
         if existing is not None and not own_image_b64:
             x, y, w, h = existing['x'], existing['y'], existing['w'], existing['h']
             tpl_b64 = existing['template_b64']
+            source_width, source_height = existing['source_width'], existing['source_height']
         else:
             try:
                 x, y, w, h = int(r['x']), int(r['y']), int(r['w']), int(r['h'])
@@ -813,24 +867,25 @@ def _sync_product_regions(conn, pid, data):
                     continue
                 warnings.append(f'第 {idx + 1} 個樣板沒有可用來源畫面，已略過')
                 continue
+            source_height, source_width = own_img.shape[:2]
 
         if existing is not None:
             conn.execute('''
                 UPDATE regions
                 SET label=?, x=?, y=?, w=?, h=?, threshold=?, search_margin=?,
-                    sample_hint=?, template_b64=?, capture_group_id=?
+                    sample_hint=?, template_b64=?, source_width=?, source_height=?, capture_group_id=?
                 WHERE id=? AND product_id=?
             ''', (label, x, y, w, h, threshold, search_margin, sample_hint,
-                  tpl_b64, capture_group_id, existing['id'], pid))
+                  tpl_b64, source_width, source_height, capture_group_id, existing['id'], pid))
             saved_id = int(existing['id'])
             retained_ids.add(saved_id)
         else:
             cur = conn.execute('''
                 INSERT INTO regions
-                (product_id,label,x,y,w,h,threshold,search_margin,sample_hint,template_b64,capture_group_id)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                (product_id,label,x,y,w,h,threshold,search_margin,sample_hint,template_b64,source_width,source_height,capture_group_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             ''', (pid, label, x, y, w, h, threshold, search_margin,
-                  sample_hint, tpl_b64, capture_group_id))
+                  sample_hint, tpl_b64, source_width, source_height, capture_group_id))
             saved_id = int(cur.lastrowid)
 
         saved_rows.append({'id': saved_id, 'label': label})
@@ -887,16 +942,18 @@ def _append_product_region_data(conn, pid, r, data=None):
     tpl_b64 = _region_crop_b64(src_img, x, y, w, h)
     if tpl_b64 is None:
         raise ValueError('沒有可用的來源畫面，無法建立樣板')
+    source_height, source_width = src_img.shape[:2]
     cur = conn.execute('''
         INSERT INTO regions
-        (product_id,label,x,y,w,h,threshold,search_margin,sample_hint,template_b64,capture_group_id)
-        VALUES (?,?,?,?,?,?,?,?,?,?,NULL)
-    ''', (pid, label, x, y, w, h, threshold, search_margin, sample_hint, tpl_b64))
+        (product_id,label,x,y,w,h,threshold,search_margin,sample_hint,template_b64,source_width,source_height,capture_group_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL)
+    ''', (pid, label, x, y, w, h, threshold, search_margin, sample_hint, tpl_b64, source_width, source_height))
     rid = int(cur.lastrowid)
     return {
         'id': rid, 'product_id': pid, 'label': label,
         'x': x, 'y': y, 'w': w, 'h': h, 'threshold': threshold,
         'search_margin': search_margin, 'sample_hint': sample_hint,
+        'source_width': source_width, 'source_height': source_height,
     }
 
 
@@ -1118,7 +1175,8 @@ def _load_inspection_items(conn, product_id, enabled_only=False):
         sample_enabled = 'AND t.enabled=1' if enabled_only else ''
         samples = conn.execute(f'''
             SELECT t.id, t.item_id, t.sample_name, COALESCE(t.sample_role, 'OK') AS sample_role, t.source_product_id, t.source_region_id,
-                   t.x, t.y, t.w, t.h, t.threshold, t.search_margin, t.enabled, t.sort_order,
+                   t.x, t.y, t.w, t.h, t.threshold, t.search_margin,
+                   t.source_width, t.source_height, t.enabled, t.sort_order,
                    p.serial AS source_product_serial, p.name AS source_product_name,
                    r.label AS source_region_label,
                    COALESCE(r.sample_hint, 'OK') AS source_sample_hint
@@ -1214,11 +1272,12 @@ def attach_region_to_step(pid, rid):
         conn.execute('''
             INSERT INTO inspection_item_templates
             (item_id, sample_name, sample_role, source_product_id, source_region_id,
-             x, y, w, h, threshold, search_margin, template_b64, enabled, sort_order)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?)
+             x, y, w, h, threshold, search_margin, template_b64, source_width, source_height, enabled, sort_order)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)
         ''', (step_id, sample_name, sample_role, pid, rid,
               region['x'], region['y'], region['w'], region['h'], region['threshold'],
-              region['search_margin'] or 0, region['template_b64'], next_sample_order))
+              region['search_margin'] or 0, region['template_b64'],
+              region['source_width'], region['source_height'], next_sample_order))
         conn.commit()
 
         items = _load_inspection_items(conn, pid, enabled_only=False)
@@ -1303,7 +1362,7 @@ def _save_inspection_items_data(conn, pid, data):
         row['id']: dict(row) for row in conn.execute('''
             SELECT t.id, t.sample_name, COALESCE(t.sample_role, 'OK') AS sample_role,
                    t.source_product_id, t.source_region_id, t.x, t.y, t.w, t.h,
-                   t.threshold, t.search_margin, t.template_b64
+                   t.threshold, t.search_margin, t.template_b64, t.source_width, t.source_height
             FROM inspection_item_templates t
             JOIN inspection_items i ON i.id=t.item_id
             WHERE i.product_id=?
@@ -1366,8 +1425,11 @@ def _save_inspection_items_data(conn, pid, data):
 
             src = None
             source_key_id = source_region_id
+            # Imported samples remain snapshots until explicitly refreshed.
             old_copy = existing_sample_copies.get(existing_sample_id)
-            if old_copy and old_copy.get('source_product_id') != pid and old_copy.get('source_region_id') == source_region_id and old_copy.get('template_b64'):
+            if (old_copy and old_copy.get('source_product_id') != pid
+                    and old_copy.get('source_region_id') == source_region_id
+                    and old_copy.get('template_b64')):
                 src = dict(old_copy)
                 src['default_sample_name'] = src.get('sample_name') or 'Imported sample'
             if src is None and source_region_id is not None and source_region_id > 0:
@@ -1399,12 +1461,13 @@ def _save_inspection_items_data(conn, pid, data):
             conn.execute('''
                 INSERT INTO inspection_item_templates
                 (item_id, sample_name, sample_role, source_product_id, source_region_id,
-                 x, y, w, h, threshold, search_margin, template_b64, enabled, sort_order)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 x, y, w, h, threshold, search_margin, template_b64, source_width, source_height, enabled, sort_order)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ''', (item_id, sample_name, sample_role, src.get('source_product_id'), src.get('source_region_id'),
                   src['x'], src['y'], src['w'], src['h'], src['threshold'],
                   src['search_margin'] if src.get('search_margin') is not None else 0,
-                  src['template_b64'], 1, sample_order))
+                  src['template_b64'], src.get('source_width') or 0,
+                  src.get('source_height') or 0, 1, sample_order))
             added_source_keys.add(sample_key)
             saved_samples += 1
             sample_order += 1
@@ -2402,6 +2465,12 @@ def _prepare_frame(frame, product):
     if target_w > 0 and target_h > 0 and (frame.shape[1] != target_w or frame.shape[0] != target_h):
         frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
     # Keep PC runtime consistent with the transform used when the video frame was labeled.
+    return vc.apply_digital_zoom(frame, load_vision_config())
+
+
+def _prepare_edge_frame(frame, product):
+    """Keep the camera's real resolution; Edge scales saved templates instead."""
+    del product
     return vc.apply_digital_zoom(frame, load_vision_config())
 
 

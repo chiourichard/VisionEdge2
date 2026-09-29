@@ -39,7 +39,8 @@ def make_db():
       label TEXT, thumb_b64 TEXT, created_at TEXT);
     CREATE TABLE regions(id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, label TEXT,
       x INTEGER NOT NULL,y INTEGER NOT NULL,w INTEGER NOT NULL,h INTEGER NOT NULL,threshold REAL,
-      search_margin INTEGER,sample_hint TEXT,template_b64 TEXT,capture_group_id INTEGER);
+      search_margin INTEGER,sample_hint TEXT,template_b64 TEXT,source_width INTEGER DEFAULT 0,
+      source_height INTEGER DEFAULT 0,capture_group_id INTEGER);
     CREATE TABLE inspection_rules(id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL,
       name TEXT, logic_mode TEXT, enabled INTEGER, sort_order INTEGER);
     CREATE TABLE inspection_rule_items(id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id INTEGER NOT NULL,
@@ -51,15 +52,16 @@ def make_db():
     CREATE TABLE inspection_item_templates(id INTEGER PRIMARY KEY AUTOINCREMENT,item_id INTEGER,
       sample_name TEXT,sample_role TEXT,source_product_id INTEGER,source_region_id INTEGER,
       x INTEGER,y INTEGER,w INTEGER,h INTEGER,threshold REAL,search_margin INTEGER,
-      template_b64 TEXT,enabled INTEGER,sort_order INTEGER);
+      template_b64 TEXT,source_width INTEGER DEFAULT 0,source_height INTEGER DEFAULT 0,
+      enabled INTEGER,sort_order INTEGER);
     INSERT INTO products VALUES(1,'P1','Test Product',NULL);
     INSERT INTO capture_groups(id,product_id,label,thumb_b64) VALUES(1,1,'0:01','A');
     INSERT INTO capture_groups(id,product_id,label,thumb_b64) VALUES(2,1,'0:02','B');
     INSERT INTO capture_groups(id,product_id,label,thumb_b64) VALUES(3,1,'orphan','C');
-    INSERT INTO regions(id,product_id,label,x,y,w,h,threshold,search_margin,sample_hint,template_b64,capture_group_id)
-      VALUES(10,1,'KEEP',10,10,20,20,.80,5,'OK','OLD_KEEP',1);
-    INSERT INTO regions(id,product_id,label,x,y,w,h,threshold,search_margin,sample_hint,template_b64,capture_group_id)
-      VALUES(11,1,'DELETE',40,40,20,20,.85,5,'OK','OLD_DELETE',2);
+    INSERT INTO regions(id,product_id,label,x,y,w,h,threshold,search_margin,sample_hint,template_b64,source_width,source_height,capture_group_id)
+      VALUES(10,1,'KEEP',10,10,20,20,.80,5,'OK','OLD_KEEP',160,120,1);
+    INSERT INTO regions(id,product_id,label,x,y,w,h,threshold,search_margin,sample_hint,template_b64,source_width,source_height,capture_group_id)
+      VALUES(11,1,'DELETE',40,40,20,20,.85,5,'OK','OLD_DELETE',160,120,2);
     INSERT INTO inspection_rules(id,product_id,name,logic_mode,enabled,sort_order) VALUES(1,1,'Legacy','ANY',1,0);
     INSERT INTO inspection_rule_items(rule_id,region_id,enabled,sort_order) VALUES(1,10,1,0);
     INSERT INTO inspection_rule_items(rule_id,region_id,enabled,sort_order) VALUES(1,11,1,1);
@@ -115,6 +117,8 @@ def main():
     new_row = next(r for r in rows if r['label'] == 'NEW')
     new_id = new_row['id']
     assert new_id != 10 and new_row['capture_group_id'] is not None
+    assert tuple(conn.execute('SELECT source_width,source_height FROM regions WHERE id=?',
+                              (new_id,)).fetchone()) == (160, 120)
 
     # 3) Save metadata again: IDs must not churn. This is the core Flow/SOP fix.
     before = {r['label']: r['id'] for r in rows}
@@ -136,8 +140,10 @@ def main():
     }]})
     conn.commit()
     assert result['count'] == 1 and result['samples'] == 1, result
-    saved_source = conn.execute('SELECT source_region_id FROM inspection_item_templates').fetchone()['source_region_id']
+    saved_sample = conn.execute('SELECT source_region_id,source_width,source_height FROM inspection_item_templates').fetchone()
+    saved_source = saved_sample['source_region_id']
     assert saved_source == new_id
+    assert (saved_sample['source_width'], saved_sample['source_height']) == (160, 120)
 
     # 5) Additive scratch-label save must preserve every existing template.
     before_ids = [r['id'] for r in conn.execute('SELECT id FROM regions ORDER BY id')]

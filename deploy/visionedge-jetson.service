@@ -1,0 +1,18 @@
+[Unit]
+Description=VisionEdge Jetson BRIO Camera Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jetson
+Group=jetson
+SupplementaryGroups=video
+WorkingDirectory=/home/jetson/VisionEdge
+ExecStart=/usr/bin/bash /home/jetson/VisionEdge/run_edge.sh
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

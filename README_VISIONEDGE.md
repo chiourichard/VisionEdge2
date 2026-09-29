@@ -1,7 +1,6 @@
-# VisionEdge 2.3.1
+# VisionEdge 2.4.9-jetson.1
 
-本版新增精細標記縮放，操作見 [RELEASE_2.3.1_ZH.md](RELEASE_2.3.1_ZH.md)。完整教學手冊在 docs 目錄。
-
+本包為新版 VisionEdge UI/流程功能整合至 Jetson 分支的版本；合併邊界與保留項目見 [MERGE_2.4.9_JETSON_ZH.md](MERGE_2.4.9_JETSON_ZH.md)。
 本版影像包裝循環設定與更新注意事項：[RELEASE_2.3_ZH.md](RELEASE_2.3_ZH.md)。
 
 本版更新與操作說明請見 [RELEASE_2.2.1_ZH.md](RELEASE_2.2.1_ZH.md)；2.2.0 原始說明保留於 [RELEASE_2.2_ZH.md](RELEASE_2.2_ZH.md)。

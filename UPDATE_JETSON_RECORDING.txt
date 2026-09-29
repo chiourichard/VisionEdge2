@@ -1,0 +1,26 @@
+﻿Jetson Orin Nano 長時間錄影更新 — 2026-09-30
+適用：本次提供的 VisionEdge-2.4.9-jetson-integrated (1).zip。
+請閱讀 JETSON_LONG_RECORDING.md，依步驟先檢查、停止服務、備份，再覆蓋更新。
+
+新增：H.264 MP4、碼率/FPS/解析度設定、定時分檔、獨立時間戳與段序號、
+實測碼率與剩餘時間估計、未完成片段保護，以及低空間/編碼/影像過期錯誤處理。
+不加入循環覆寫、Label 觸發或自動恢復。原有固定容量空間保護保留。
+
+Orin Nano 沒有 NVENC，這版使用 FFmpeg/libx264 軟體編碼；CUDA 樣板比對保留。
+先在更新包解壓目錄執行 check_recording_env.py，必須顯示 PASS。
+請用與 VisionEdge 相同的帳號及 Python 環境，例如：
+  cd /home/jetson/VisionEdge
+  .venv/bin/python /更新包解壓目錄/check_recording_env.py
+（請改成實際路徑。）若 FFmpeg/libx264 缺少，先安裝相符的系統套件再檢查。
+不要安裝 CPU 版 OpenCV wheel 取代現有 CUDA OpenCV。
+
+PASS 後停止錄影及 VisionEdge。備份同名程式檔，再把更新包內容覆蓋至原專案根目錄，
+static 資料夾採合併。重新啟動服務並 Ctrl+F5。
+
+既有設定不覆蓋：CUDA、BRIO、預覽解析度、相機來源、FPS、舊錄影寬高皆保留。
+新錄影最高解析度預設「沿用既有錄影尺寸」，新分檔預設 10 分鐘。
+正式測試建議 1080p、15 FPS、2.5 Mbps，仍需實機檢測並行與全天錄影驗收。
+
+本包不含 config、db、uploads、runtime_data、憑證或私鑰。
+本包沒有修改啟動腳本、uv/套件鎖定或 CUDA OpenCV 建置腳本。
+回復方式請見 JETSON_LONG_RECORDING.md。

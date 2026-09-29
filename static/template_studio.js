@@ -1,3 +1,12 @@
+let studioPreview=null;
+function syncStudioPreview(){
+ const image=document.getElementById('studioLive');
+ if(!studioPreview)studioPreview=new LatestPreview(image,'/api/edge/preview.jpg');
+ studioPreview.configure(libraryMode&&!image.hidden&&!document.hidden,'raw');
+}
+document.addEventListener('visibilitychange',()=>{if(studioPreview)syncStudioPreview()});
+window.addEventListener('pagehide',()=>studioPreview?.stop());
+window.addEventListener('pageshow',()=>{if(studioPreview)syncStudioPreview()});
 const libraryMode=location.pathname.endsWith('/template-studio');
 let libraryRows=[],libraryEdits=new Set(),libraryBusy=false,qtiReport=null,libraryLeaving=false;
 async function studioRequest(url,options={}){const r=await fetch(url,{...options,headers:{'Content-Type':'application/json',...options.headers}});const d=await r.json();if(!r.ok||d.ok===false||d.success===false)throw Error(d.error||'操作失敗');return d;}
@@ -26,7 +35,7 @@ async function librarySave(id){
  const r=libraryRows.find(x=>x.id===id),row=document.querySelector(`[data-library-id="${id}"]`),data={version:r.version};
  row.querySelectorAll('[data-label-field]').forEach(el=>data[el.dataset.labelField]=el.value);
  if(r.references.length&&!confirm('此修改會同步更新引用此 Label 的規則；儲存後需重新套用。確定？'))return;
- librarySetBusy(true);
+ librarySetBusy(true);studioPreview?.stop();
  try{await studioRequest(`/api/products/${ST.productId}/label-library/${id}`,{method:'PUT',body:JSON.stringify(data)});libraryEdits.delete(id);await libraryReloadOne(id);document.getElementById('libraryStatus').textContent='樣板已儲存，請試跑並套用';toast('樣板已儲存，請試跑並套用');}catch(e){toast(e.message,true)}finally{librarySetBusy(false);}
 }
 async function libraryReloadOne(id){
@@ -37,12 +46,12 @@ async function libraryReloadOne(id){
  document.getElementById('labelTestResults').innerHTML='';
  ST.templates=await studioRequest('/api/templates');
 }
-async function libraryDelete(id){if(libraryBusy||!confirm('刪除此未引用的樣板？'))return;librarySetBusy(true);try{await studioRequest(`/api/products/${ST.productId}/label-library/${id}`,{method:'DELETE',body:JSON.stringify({version:libraryRows.find(x=>x.id===id).version})});libraryEdits.delete(id);await libraryReloadOne(id)}catch(e){toast(e.message,true)}finally{librarySetBusy(false)}}
+async function libraryDelete(id){if(libraryBusy||!confirm('刪除此未引用的樣板？'))return;librarySetBusy(true);try{await studioRequest(`/api/products/${ST.productId}/label-library/${id}`,{method:'DELETE',body:JSON.stringify({version:libraryRows.find(x=>x.id===id).version})});libraryEdits.delete(id);await libraryReloadOne(id);toast('樣板已刪除')}catch(e){toast(e.message,true)}finally{librarySetBusy(false)}}
 async function librarySaveDraft(i){
  if(libraryBusy)return;const r=VL.regions[i];if(!r||!ST.productId)return;
  const row=document.getElementById('draftLabel_'+i);r.label=row.querySelector('[data-draft="label"]').value.trim();r.threshold=Number(row.querySelector('[data-draft="threshold"]').value);r.search_margin=Number(row.querySelector('[data-draft="margin"]').value);
  if(!r.label||!Number.isFinite(r.threshold)||r.threshold<0||r.threshold>1||!Number.isInteger(r.search_margin)||r.search_margin<0||r.search_margin>10000){toast('名稱、門檻或位置容許值無效',true);return;}
- librarySetBusy(true);try{await studioRequest(`/api/products/${ST.productId}/regions/append`,{method:'POST',body:JSON.stringify({...r,source_image_b64:r._srcB64})});VL.regions.splice(i,1);renderTable();drawOverlay();await libraryReloadOne(-1);document.getElementById('libraryStatus').textContent='樣板已儲存，請試跑並套用';}catch(e){toast(e.message,true)}finally{librarySetBusy(false);}
+ librarySetBusy(true);try{await studioRequest(`/api/products/${ST.productId}/regions/append`,{method:'POST',body:JSON.stringify({...r,source_image_b64:r._srcB64})});VL.regions.splice(i,1);renderTable();drawOverlay();await libraryReloadOne(-1);document.getElementById('libraryStatus').textContent='樣板已儲存，請試跑並套用';toast('樣板已儲存，請試跑並套用');}catch(e){toast(e.message,true)}finally{librarySetBusy(false);}
 }
 function libraryDraftTable(){
  document.getElementById('regionBody').innerHTML=VL.regions.map((r,i)=>`<tr id="draftLabel_${i}"><td>${i+1}</td><td>${r._thumbB64?`<img alt="" src="${r._thumbB64}" style="width:48px">`:''}</td><td><input aria-label="Label 名稱" data-draft="label" value="${esc(r.label)}" oninput="VL.regions[${i}].label=this.value;drawOverlay()"></td><td><input aria-label="比對門檻" data-draft="threshold" type="number" min="0" max="1" step="0.01" value="${r.threshold}" oninput="VL.regions[${i}].threshold=Number(this.value)"></td><td><input aria-label="位置容許偏移" data-draft="margin" type="number" min="0" max="10000" value="${r.search_margin||0}" oninput="VL.regions[${i}].search_margin=Number(this.value)"></td><td><button class="btn mini primary" onclick="librarySaveDraft(${i})">儲存 Label</button><button class="btn mini" onclick="delRegion(${i})">刪除</button></td></tr>`).join('');
@@ -87,13 +96,13 @@ async function cameraRefresh(){try{
  document.getElementById('qtiState').textContent=s.error||(!s.running?'相機未啟動':s.backend!=='qti'?'目前不是 QTI 相機':qtiReport?.verified?'QTI 設定已讀回，請確認實際影像':'等待設備確認');
  document.getElementById('qtiApplied').textContent=!qtiReport?'尚未確認設備支援':qtiReport?.mode==='off'?'目前保留設備預設設定':qtiReport?.mode==='safe'?'目前只套用白平衡':'手動模式：調整後請儲存並確認實際影像';
  }catch(e){toast(e.message,true)}}
-async function cameraStart(){if(libraryBusy)return;librarySetBusy(true);try{await studioRequest('/api/edge/start',{method:'POST'});document.getElementById('studioLive').src='/api/edge/live.mjpg';document.getElementById('studioLive').hidden=false;for(let i=0;i<12;i++){const s=await studioRequest('/api/edge/status');if(s.error)throw Error(s.error);if(s.frame_fresh)break;await new Promise(r=>setTimeout(r,500));}await cameraRefresh()}catch(e){toast(e.message,true)}finally{librarySetBusy(false)}}
+async function cameraStart(){if(libraryBusy)return;librarySetBusy(true);try{await studioRequest('/api/edge/start',{method:'POST'});document.getElementById('studioLive').hidden=false;syncStudioPreview();for(let i=0;i<12;i++){const s=await studioRequest('/api/edge/status');if(s.error)throw Error(s.error);if(s.frame_fresh)break;await new Promise(r=>setTimeout(r,500));}await cameraRefresh()}catch(e){toast(e.message,true)}finally{librarySetBusy(false)}}
 async function cameraApply(){
  if(libraryBusy)return;
  if(VL.regions.length&&!confirm('變更相機將清除尚未儲存的框選，確定？'))return;
  const values={};document.querySelectorAll('[data-qti]').forEach(el=>{if(!el.disabled)values[el.dataset.qti]=Number(el.value)});
- librarySetBusy(true);
- try{await studioRequest('/api/edge/config',{method:'PUT',body:JSON.stringify({restart:true,camera_controls_mode:document.getElementById('qtiMode').value,camera_control_values:JSON.stringify(values)})});const state=await studioRequest('/api/edge/status');if(!state.running)await studioRequest('/api/edge/start',{method:'POST'});resetAll();document.getElementById('studioLive').src='/api/edge/live.mjpg?t='+Date.now();document.getElementById('studioLive').hidden=false;document.getElementById('qtiState').textContent='設定已儲存，等待相機啟動；請重新確認影像及樣板';
+ librarySetBusy(true);studioPreview?.stop();
+ try{await studioRequest('/api/edge/config',{method:'PUT',body:JSON.stringify({restart:true,camera_controls_mode:document.getElementById('qtiMode').value,camera_control_values:JSON.stringify(values)})});const state=await studioRequest('/api/edge/status');if(!state.running)await studioRequest('/api/edge/start',{method:'POST'});resetAll();document.getElementById('studioLive').hidden=false;syncStudioPreview();document.getElementById('qtiState').textContent='設定已儲存，等待相機啟動；請重新確認影像及樣板';
  for(let i=0;i<12;i++){await new Promise(r=>setTimeout(r,500));const s=await studioRequest('/api/edge/status');if(s.error)throw Error(s.error);if(s.frame_fresh){await cameraRefresh();break;}}
  }catch(e){document.getElementById('qtiState').textContent=e.message;toast(e.message,true)}finally{librarySetBusy(false)}}
 window.addEventListener('beforeunload',e=>{if(libraryPending()&&!libraryLeaving){e.preventDefault();e.returnValue='';}});
@@ -107,4 +116,3 @@ function cameraMode(){
  const mode=document.getElementById('qtiMode').value;
  document.querySelectorAll('[data-qti]').forEach(el=>el.disabled=!qtiReport?.properties?.[el.dataset.qti]?.supported||mode==='off'||(mode==='safe'&&el.dataset.qti!=='white_balance_mode'));
 }
-

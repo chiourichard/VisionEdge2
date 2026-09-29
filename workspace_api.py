@@ -19,7 +19,11 @@ def register(app,base,edge):
    try:
     db.execute('BEGIN IMMEDIATE' if request.method=='PUT' else 'BEGIN')
     before=snapshot(db,pid)
-    if request.method=='GET':return jsonify(before)
+    if request.method=='GET':
+     if request.args.get('compact')=='1' and before['captures'] and before['image_b64']==before['captures'][0]['thumb_b64']:
+      response={**before,'image_b64':None}
+      return jsonify(response)
+     return jsonify(before)
     body=request.get_json(silent=True)
     if not isinstance(body,dict) or not isinstance(body.get('regions'),list):raise ValueError('樣板資料格式錯誤')
     if body.get('version')!=before['version']:return jsonify(error='樣板已被更新，請重新載入後再修改'),409
@@ -57,9 +61,10 @@ def register(app,base,edge):
     # Own-product labels remain editable where engineers expect. Other products
     # retain the imported snapshot, including threshold, geometry and image.
     for row in db.execute('SELECT * FROM regions WHERE product_id=?',(pid,)).fetchall():
-     db.execute('''UPDATE inspection_item_templates SET sample_name=?,threshold=?,search_margin=?,x=?,y=?,w=?,h=?,template_b64=?
+     db.execute('''UPDATE inspection_item_templates SET sample_name=?,threshold=?,search_margin=?,x=?,y=?,w=?,h=?,template_b64=?,source_width=?,source_height=?
        WHERE source_region_id=? AND item_id IN (SELECT id FROM inspection_items WHERE product_id=?)''',
-       (row['label'],row['threshold'],row['search_margin'],row['x'],row['y'],row['w'],row['h'],row['template_b64'],row['id'],pid))
+       (row['label'],row['threshold'],row['search_margin'],row['x'],row['y'],row['w'],row['h'],row['template_b64'],
+        row['source_width'],row['source_height'],row['id'],pid))
     db.commit();return jsonify(ok=True,version=snapshot(db,pid)['version'])
    except LookupError as exc:return jsonify(error=str(exc)),404
    except (ValueError,TypeError,KeyError,OverflowError) as exc:return jsonify(error=str(exc)),400

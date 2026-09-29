@@ -1,9 +1,18 @@
+let workspacePreview=null;
+function syncWorkspacePreview(){
+ const image=document.getElementById('studioLive');
+ if(!workspacePreview)workspacePreview=new LatestPreview(image,'/api/edge/preview.jpg');
+ workspacePreview.configure(document.getElementById('cameraDialog').open&&!image.hidden&&!document.hidden,'raw');
+}
+document.addEventListener('visibilitychange',()=>{if(workspacePreview)syncWorkspacePreview()});
+window.addEventListener('pagehide',()=>workspacePreview?.stop());
+window.addEventListener('pageshow',()=>{if(workspacePreview)syncWorkspacePreview()});
+document.getElementById('cameraDialog').addEventListener('close',()=>workspacePreview?.stop());
 // The old single-workspace editor keeps ownership of drawing, frames and selection.
-let workspaceVersion='',workspaceBaseline='',workspaceBusy=false,workspaceLeaving=false;
-let qtiReport=null,qtiSavedValues={},cameraBaseline='';
+let workspaceVersion='',workspaceBaseline='',workspaceBusy=false,workspaceLeaving=false,workspaceSaved=null;
 const asImage=s=>!s?'':s.startsWith('data:')?s:'data:image/jpeg;base64,'+s;
 async function studioRequest(url,options={}){const r=await fetch(url,{cache:'no-store',...options,headers:{'Content-Type':'application/json',...options.headers}});const d=await r.json();if(!r.ok||d.ok===false||d.success===false)throw Error(d.error||'操作失敗');return d;}
-function toast(message){setStatus(message)}
+function toast(message,kind='success'){setStatus(message);VisionEdgeNotice.show(message,kind)}
 function workspacePayload(){
  const new_capture_groups={};
  const regions=S.regions.map(r=>{
@@ -25,11 +34,11 @@ function workspaceDirtyUI(){
 function workspaceLock(b){workspaceBusy=b;document.getElementById('app').inert=b;document.querySelectorAll('#cameraDialog button,#cameraDialog select,#cameraDialog input').forEach(e=>{if(b){e.dataset.wasDisabled=String(e.disabled);e.disabled=true}else{e.disabled=e.dataset.wasDisabled==='true'}})}
 async function workspaceInit(){
  try{await loadProducts();const pid=Number(new URLSearchParams(location.search).get('product_id'));const p=S.products.find(p=>p.id===pid)||S.products[0];if(p)await selectProduct(p);else applyEditModeUI();}
- catch(e){toast(e.message)}
+ catch(e){toast(e.message,'error')}
  document.getElementById('regionBody').addEventListener('input',workspaceDirtyUI);
 }
 fetchRegions=async function(pid){
- const d=await studioRequest(`/api/products/${pid}/workspace`);workspaceVersion=d.version;
+ const d=await studioRequest(`/api/products/${pid}/workspace?compact=1`);workspaceVersion=d.version;
  S.clearTemplate=false;
  S.regions=d.regions.map(r=>({...r,_captureId:r.capture_group_id||null,_thumbB64:asImage(r.template_b64),_sel:false}));
  S.captures=d.captures.map(g=>({id:g.id,b64:asImage(g.thumb_b64),ts:g.label||String(g.id)}));
@@ -42,18 +51,28 @@ selectProduct=async function(p){
  if(workspaceBusy||p.id===S.selectedPid)return;
  if(workspacePending()&&!await workspaceConfirm('尚有未儲存的修改，確定離開？'))return;
  workspaceLock(true);
- try{resetAll();S.selectedPid=p.id;S.editMode=false;await fetchRegions(p.id);renderProductList();applyEditModeUI();setStatus(p.serial);}
- catch(e){S.selectedPid=null;toast(e.message)}finally{workspaceLock(false)}
+ try{resetAll();workspaceSaved=null;S.selectedPid=p.id;S.editMode=false;await fetchRegions(p.id);renderProductList();applyEditModeUI();setStatus(p.serial);}
+ catch(e){S.selectedPid=null;toast(e.message,'error')}finally{workspaceLock(false)}
 };
 toggleEditMode=async function(){
  if(workspaceBusy)return;
- if(!S.selectedPid){toast('請先建立或選擇產品');return;}
+ if(!S.selectedPid){toast('請先建立或選擇產品','warning');return;}
  if(S.editMode){await cancelEdit();return;}
- workspaceLock(true);try{await fetchRegions(S.selectedPid);S.editMode=true;workspaceBaseline=JSON.stringify(workspacePayload());applyEditModeUI();}catch(e){toast(e.message)}finally{workspaceLock(false)}
+ workspaceSaved={regions:S.regions.map(r=>({...r})),captures:S.captures.map(c=>({...c})),srcB64:S.srcB64,activeCaptureId:S.activeCaptureId,activeCaptureB64:S.activeCaptureB64};
+ S.editMode=true;workspaceBaseline=JSON.stringify(workspacePayload());applyEditModeUI();
 };
 cancelEdit=async function(){
  if(workspacePending()&&!await workspaceConfirm('放棄尚未儲存的修改並重新載入？'))return;
- workspaceLock(true);try{const pid=S.selectedPid;resetAll();S.editMode=false;await fetchRegions(pid);applyEditModeUI();toast('已取消修改');}catch(e){toast(e.message)}finally{workspaceLock(false)}
+ workspaceLock(true);try{
+  const saved=workspaceSaved;resetAll();S.editMode=false;
+  if(saved){
+   S.regions=saved.regions;S.captures=saved.captures;S.srcB64=saved.srcB64;
+   S.activeCaptureId=saved.activeCaptureId;S.activeCaptureB64=saved.activeCaptureB64;
+   if(S.srcB64)await displayImg(S.srcB64);
+   renderCaptureStrip();renderTable();drawOverlay();workspaceDirtyUI();
+  }else await fetchRegions(S.selectedPid);
+  workspaceSaved=null;applyEditModeUI();toast('已取消修改');
+ }catch(e){toast(e.message,'error')}finally{workspaceLock(false)}
 };
 const legacyApplyEdit=applyEditModeUI;
 applyEditModeUI=function(){legacyApplyEdit();document.getElementById('editModeBtn').textContent=S.editMode?'結束編輯':'編輯';renderCaptureStrip();DC.style.pointerEvents='auto';workspaceDirtyUI();labelControls()};
@@ -62,12 +81,16 @@ renderTable=function(){legacyTable();workspaceDirtyUI()};
 saveRegions=async function(){
  if(workspaceBusy||!S.editMode||!S.selectedPid)return;
  const payload=workspacePayload();
- if(payload.regions.some(r=>!r.label.trim()||!Number.isFinite(r.threshold)||r.threshold<0||r.threshold>1||!Number.isInteger(r.search_margin)||r.search_margin<0||r.search_margin>10000)){toast('名稱、門檻或位置容許值無效');return;}
+ if(payload.regions.some(r=>!r.label.trim()||!Number.isFinite(r.threshold)||r.threshold<0||r.threshold>1||!Number.isInteger(r.search_margin)||r.search_margin<0||r.search_margin>10000)){toast('名稱、門檻或位置容許值無效','warning');return;}
  workspaceLock(true);
  try{
-  await studioRequest(`/api/products/${S.selectedPid}/workspace`,{method:'PUT',body:JSON.stringify({...payload,image_b64:S.srcB64,version:workspaceVersion})});
-  S.editMode=false;await fetchRegions(S.selectedPid);await loadProducts();applyEditModeUI();toast(payload.clear_reference?'樣板已清除，產品與流程已保留':'樣板已儲存，請試跑並套用');
- }catch(e){toast(e.message)}finally{workspaceLock(false)}
+  const imageChanged=!workspaceSaved||S.srcB64!==workspaceSaved.srcB64;
+  const needsFallback=payload.regions.some(r=>!r.id&&!r.source_image_b64);
+  const body={...payload,version:workspaceVersion};
+  if((imageChanged||needsFallback)&&S.srcB64)body.image_b64=S.srcB64;
+  await studioRequest(`/api/products/${S.selectedPid}/workspace`,{method:'PUT',body:JSON.stringify(body)});
+  S.editMode=false;workspaceSaved=null;await fetchRegions(S.selectedPid);await loadProducts();applyEditModeUI();toast(payload.clear_reference?'樣板已清除，產品與流程已保留':'樣板已儲存，請試跑並套用');
+ }catch(e){toast(e.message,'error')}finally{workspaceLock(false)}
 };
 async function workspaceNavigate(path){if(workspaceBusy)return;if(workspacePending()&&!await workspaceConfirm('尚有未儲存的修改，確定離開？'))return;workspaceLeaving=true;location.href=path+'?product_id='+(S.selectedPid||0)}
 const legacyAdd=openAddProduct;
@@ -80,7 +103,7 @@ async function workspaceCapture(){
   LV.pause();S.lblVideoReady=false;S.lblServerMode=false;showVideoBar(false);_showMovingLabelVideo(false);
   _clearActivePin();S.srcB64=d.image_b64;await displayImg(d.image_b64);pinCurrentFrame();document.getElementById('backToLiveBtn').style.display='none';
   toast('相機畫面已固定，可以框選樣板');
- }catch(e){toast(e.message)}finally{workspaceLock(false)}
+ }catch(e){toast(e.message,'error')}finally{workspaceLock(false)}
 }
 async function workspaceTest(){
  if(workspaceBusy||S.editMode||!S.selectedPid)return;
@@ -88,7 +111,7 @@ async function workspaceTest(){
   const d=await studioRequest(`/api/products/${S.selectedPid}/label-library/test`,{method:'POST',body:'{}'});
   document.getElementById('labelTestResults').innerHTML='<table><thead><tr><th>Label</th><th>分數</th><th>門檻</th><th>樣板符合</th></tr></thead><tbody>'+d.results.map(x=>`<tr><td data-i18n-skip>${esc(x.label)}</td><td>${x.score??'—'}</td><td>${x.threshold}</td><td>${x.error?esc(x.error):x.pass?'✓':'—'}</td></tr>`).join('')+'</tbody></table>';
   document.getElementById('testDialog').showModal();
- }catch(e){toast(e.message)}finally{workspaceLock(false)}
+ }catch(e){toast(e.message,'error')}finally{workspaceLock(false)}
 }
 async function workspaceApply(){
  if(workspaceBusy||S.editMode||!S.selectedPid)return;workspaceLock(true);
@@ -101,39 +124,41 @@ async function workspaceApply(){
    await studioRequest(`/api/products/${S.selectedPid}/sop-definition`,{method:'POST',body:JSON.stringify({config:{enabled:false},packaging:{enabled:false},final_logic_mode:'ALL',steps:[{name:'基本檢查',enabled:true,required:true,logic_mode:'ALL',samples:rows.map(r=>({source_region_id:r.id,sample_role:cleanSampleHint(r.sample_hint),sample_name:r.label}))}]})});
   }else if(!await workspaceConfirm('將套用既有規則／流程。新增 Label 不會自動加入既有規則，請先確認引用。繼續？'))return;
   await studioRequest('/api/edge/apply',{method:'POST',body:JSON.stringify({product_id:S.selectedPid})});toast('設定已套用，請回即時檢測確認');
- }catch(e){toast(e.message)}finally{workspaceLock(false)}
+ }catch(e){toast(e.message,'error')}finally{workspaceLock(false)}
 }
-function cameraForm(){return JSON.stringify([document.getElementById('qtiMode').value,...[...document.querySelectorAll('[data-qti]')].map(e=>e.value)])}
-async function workspaceCameraOpen(){if(workspaceBusy)return;document.getElementById('cameraDialog').showModal();await cameraRefresh();}
-async function workspaceCameraClose(){if(cameraBaseline&&cameraForm()!==cameraBaseline&&!await workspaceConfirm('放棄尚未儲存的相機設定？'))return;document.getElementById('studioLive').removeAttribute('src');document.getElementById('cameraDialog').close();}
-function cameraMode(){const m=document.getElementById('qtiMode').value;document.querySelectorAll('[data-qti]').forEach(e=>e.disabled=!qtiReport?.properties?.[e.dataset.qti]?.supported||m==='off'||(m==='safe'&&e.dataset.qti!=='white_balance_mode'));}
+async function workspaceCameraOpen(){
+ if(workspaceBusy)return;
+ document.getElementById('cameraDialog').showModal();syncWorkspacePreview();
+ await cameraRefresh();
+}
+async function workspaceCameraClose(){
+ workspacePreview?.stop();
+ document.getElementById('cameraDialog').close();
+}
 async function cameraRefresh(){
  try{
-  const [c,s]=await Promise.all([studioRequest('/api/edge/config'),studioRequest('/api/edge/status')]);const cfg=c.config||c;
-  document.getElementById('qtiMode').value=cfg.camera_controls_mode||'safe';qtiReport=s.backend_status?.camera_controls;qtiSavedValues=JSON.parse(cfg.camera_control_values||'{}');
-  document.querySelectorAll('[data-qti]').forEach(original=>{let e=original;const k=e.dataset.qti,p=qtiReport?.properties?.[k];
-   if(p?.choices?.length&&e.tagName!=='SELECT'){e=document.createElement('select');e.dataset.qti=k;e.dataset.default=original.dataset.default;original.replaceWith(e);}
-   if(e.tagName==='SELECT')e.innerHTML=(p?.choices||[]).map(c=>`<option value="${c.value}" data-i18n-skip>${esc(c.label)}</option>`).join('');
-   e.value=qtiSavedValues[k]??p?.current??p?.default??e.dataset.default;if(p){e.min=p.min;e.max=p.max;}
-   e.parentElement.querySelector('small').textContent=p?.supported?'設備支援':'尚未確認設備支援';
-  });cameraMode();cameraBaseline=cameraForm();
-  document.getElementById('qtiState').textContent=s.error||(!s.running?'相機未啟動':s.backend!=='qti'?'目前不是 QTI 相機':qtiReport?.verified?'QTI 設定已讀回，請確認實際影像':'等待設備確認');
-  document.getElementById('qtiApplied').textContent=qtiReport?.mode==='safe'?'目前只套用白平衡':'取像與正式檢測共用相機設定';
- }catch(e){document.getElementById('qtiState').textContent=e.message}
+  const s=await studioRequest('/api/edge/status');
+  const b=s.backend_status||{};
+  const size=b.width&&b.height?` · ${b.width}×${b.height}`:'';
+  document.getElementById('cameraState').textContent=s.error||
+   (!s.running?'相機未啟動':`${s.backend||'相機'}${size} · ${s.frame_fresh?'影像正常':'等待影像'}`);
+ }catch(e){document.getElementById('cameraState').textContent=e.message}
 }
 async function cameraStart(){
- if(workspaceBusy)return;workspaceLock(true);try{await studioRequest('/api/edge/start',{method:'POST'});document.getElementById('studioLive').src='/api/edge/live.mjpg?mode=raw';document.getElementById('studioLive').hidden=false;
-  for(let i=0;i<12;i++){const s=await studioRequest('/api/edge/status');if(s.error)throw Error(s.error);if(s.frame_fresh)break;await new Promise(r=>setTimeout(r,500));}
- }catch(e){document.getElementById('qtiState').textContent=e.message}finally{workspaceLock(false);await cameraRefresh()}
-}
-async function cameraApply(){
- if(workspaceBusy)return;if(workspacePending()){alert('請先儲存或取消樣板編輯，再變更相機');return;}
- const values={...qtiSavedValues};document.querySelectorAll('[data-qti]').forEach(e=>{if(!e.disabled)values[e.dataset.qti]=Number(e.value)});
- workspaceLock(true);try{
-  await studioRequest('/api/edge/config',{method:'PUT',body:JSON.stringify({restart:true,camera_controls_mode:document.getElementById('qtiMode').value,camera_control_values:values})});
-  cameraBaseline=cameraForm();toast('相機設定已儲存，請重新擷取並驗證樣板');
- }catch(e){document.getElementById('qtiState').textContent=e.message;workspaceLock(false);return;}
- workspaceLock(false);await cameraStart();
+ if(workspaceBusy)return;
+ workspaceLock(true);
+ try{
+  await studioRequest('/api/edge/start',{method:'POST'});
+
+  document.getElementById('studioLive').hidden=false;syncWorkspacePreview();
+  for(let i=0;i<12;i++){
+   const s=await studioRequest('/api/edge/status');
+   if(s.error)throw Error(s.error);
+   if(s.frame_fresh)break;
+   await new Promise(r=>setTimeout(r,500));
+  }
+ }catch(e){document.getElementById('cameraState').textContent=e.message}
+ finally{workspaceLock(false);await cameraRefresh()}
 }
 window.addEventListener('beforeunload',e=>{if(workspacePending()&&!workspaceLeaving){e.preventDefault();e.returnValue='';}});
 document.getElementById('cameraDialog').addEventListener('cancel',e=>{e.preventDefault();workspaceCameraClose()});
@@ -160,16 +185,3 @@ function workspaceConfirm(message){return new Promise(resolve=>{
  no.onclick=()=>done(false);yes.onclick=()=>done(true);d.oncancel=e=>{e.preventDefault();done(false)};
  d.append(no,yes);document.body.appendChild(d);d.showModal();no.focus();
 })}
-
-// Product deletion is a separate, confirmed operation from clearing its template.
-delProduct=async function(event,pid){
- event.stopPropagation();if(workspaceBusy)return;
- const p=S.products.find(p=>p.id===pid);if(!p)return;
- if(workspacePending()&&!await workspaceConfirm('尚有未儲存的修改，確定離開？'))return;
- if(!await workspaceConfirm('刪除產品「'+p.serial+'」及其所有樣板、Label 與流程？此操作無法復原。'))return;
- workspaceLock(true);
- try{await studioRequest(`/api/products/${pid}`,{method:'DELETE'});
-  if(S.selectedPid===pid){resetAll();S.selectedPid=null;S.editMode=false;workspaceBaseline='';workspaceVersion='';}
-  await loadProducts();applyEditModeUI();toast('產品已刪除');
- }catch(e){toast(e.message)}finally{workspaceLock(false)}
-};
