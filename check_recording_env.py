@@ -37,11 +37,12 @@ def main():
     with tempfile.TemporaryDirectory(prefix='visionedge-record-check-') as temporary:
         root = Path(temporary)
         pattern, manifest = root/'check_%06d.mp4.part', root/'closed.csv'
+        # Match the recorder: forced boundary keyframes need no sc_threshold option.
         command = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-filter_threads', '1',
                    '-f', 'rawvideo', '-pixel_format', 'bgr24', '-video_size', '640x360', '-framerate', '15',
                    '-i', 'pipe:0', '-map', '0:v:0', '-an', '-c:v', 'libx264', '-preset', 'veryfast',
                    '-tune', 'zerolatency', '-threads', '2', '-pix_fmt', 'yuv420p', '-b:v', '2500000',
-                   '-maxrate', '2500000', '-bufsize', '5000000', '-g', '15', '-sc_threshold', '0',
+                   '-maxrate', '2500000', '-bufsize', '5000000', '-g', '15',
                    '-force_key_frames', 'expr:gte(t,n_forced*1)', '-f', 'segment', '-segment_format', 'mp4',
                    '-segment_time', '1', '-reset_timestamps', '1', '-segment_list', str(manifest),
                    '-segment_list_type', 'csv', str(pattern)]

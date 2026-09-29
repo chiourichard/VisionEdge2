@@ -113,13 +113,15 @@ class H264Recorder:
         # Only finalized segments appear in this CSV. It is kept outside media
         # listings and removed on shutdown; incomplete .part files remain visible.
         self.manifest = self.folder / (self.prefix + '.csv')
+        # Force a keyframe at each segment boundary. Do not require the optional
+        # sc_threshold option: some deployed FFmpeg builds do not expose it.
         command = [executable, '-hide_banner', '-loglevel', 'warning', '-nostdin', '-n', '-filter_threads', '1',
                    '-f', 'rawvideo', '-pixel_format', 'bgr24', '-video_size', f'{self.size[0]}x{self.size[1]}',
                    '-framerate', str(self.fps), '-i', 'pipe:0', '-map', '0:v:0', '-an', '-c:v', 'libx264',
                    '-preset', 'veryfast', '-tune', 'zerolatency', '-threads', '2',
                    '-pix_fmt', 'yuv420p', '-b:v', str(bitrate), '-maxrate', str(bitrate),
                    '-bufsize', str(bitrate * 2), '-g', str(max(1, round(self.fps * 2))),
-                   '-sc_threshold', '0', '-force_key_frames', f'expr:gte(t,n_forced*{segment})',
+                   '-force_key_frames', f'expr:gte(t,n_forced*{segment})',
                    '-f', 'segment', '-segment_format', 'mp4', '-segment_time', str(segment),
                    '-reset_timestamps', '1', '-segment_list', str(self.manifest),
                    '-segment_list_type', 'csv', str(pattern)]

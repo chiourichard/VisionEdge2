@@ -1,5 +1,6 @@
 """Jetson settings survive recorder migration; no hardware encoder selection."""
 import tempfile
+import subprocess
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -9,6 +10,7 @@ import numpy as np
 
 from edge_runtime import EdgeConfig
 from long_recording import H264Recorder
+import check_recording_env
 
 
 def main():
@@ -58,6 +60,14 @@ min_free_mb = 0
             which.assert_called_once_with('ffmpeg')
             command=spawn.call_args.args[0]
             assert 'libx264' in command and 'v4l2h264enc' not in str(command) and 'nvenc' not in str(command)
+            assert '-sc_threshold' not in command
+            assert '-force_key_frames' in command and '-g' in command
+        real_popen = subprocess.Popen
+        def compatible_encoder(command, **kwargs):
+            assert '-sc_threshold' not in command, 'Unsupported optional FFmpeg argument'
+            return real_popen(command, **kwargs)
+        with patch('check_recording_env.subprocess.Popen', side_effect=compatible_encoder):
+            assert check_recording_env.main() == 0
     print('JETSON_RECORDING_COMPAT PASS: CUDA/BRIO/preview settings, legacy dimensions, aspect ratio, explicit size override, libx264 selection')
 
 
