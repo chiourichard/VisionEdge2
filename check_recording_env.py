@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from recording_ffmpeg import recording_ffmpeg
 
 
 def mp4_complete(path):
@@ -30,7 +31,7 @@ def mp4_complete(path):
 
 
 def main():
-    ffmpeg = shutil.which('ffmpeg')
+    ffmpeg = recording_ffmpeg()
     if not ffmpeg:
         print('FAIL: Jetson Orin Nano requires FFmpeg with libx264 in the VisionEdge service PATH.')
         return 1

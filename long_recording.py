@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 
 import cv2
+from recording_ffmpeg import recording_ffmpeg
 
 
 class H264Recorder:
@@ -81,7 +82,7 @@ class H264Recorder:
         if getattr(self, 'watchdog', None):
             self.watchdog.join(timeout=1)
         # Orin Nano has no NVENC. CUDA/GStreamer capture must not select a hardware encoder.
-        executable = shutil.which('ffmpeg')
+        executable = recording_ffmpeg()
         self.encoder = 'libx264'
         if not executable:
             return False, '長時間錄影需要 FFmpeg（含 libx264）；請由設備管理員安裝後重試。'
