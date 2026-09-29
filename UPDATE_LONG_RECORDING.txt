@@ -1,0 +1,41 @@
+﻿VisionEdge OELinux 硬體 H.264 錄影修正版 — 2026-09-29
+適用：使用者 check_windows.zip（版本標記 2.4.9，含後續介面更新），
+以及已套用前一個 FFmpeg 錄影更新包的同一份專案。
+此為附件專用功能更新，不是整套版本升級；保留 VERSION 標記。
+
+本次修正：OELinux 優先使用 GStreamer/v4l2h264enc，不再要求 FFmpeg/libx264。
+保留含標記錄影的碼率、FPS、輸出解析度、時間戳與自動分檔功能。
+硬體 H.264 在獨立程序執行，畫面疊字與縮放仍使用 CPU。
+沒有 Label 觸發、沒有循環刪除舊片段。QTI 原始錄影維持原有路徑。
+
+步驟：
+1. 在相機將本 ZIP 解壓到暫存目錄。停止 VisionEdge 錄影及取像，
+   保留系統 cam-server 正常運作，不要停止或重啟它。
+2. 在「新版解壓目錄」，使用與 VisionEdge 相同的 Python/服務帳號執行：
+   python3 check_recording_env.py
+   輸出應先顯示 Testing GStreamer ...，最後顯示 PASS。
+   gst_record_worker.py 必須與檢查工具放在同一個目錄。
+   此工具測試 appsrc、格式轉換、硬體碼率設定及 MP4 分檔，不開相機，
+   不安裝套件、不更改服務，暫存測試影片會刪除。
+   若 FAIL，先不要覆蓋，提供完整輸出。
+3. PASS 後停止 VisionEdge 程序，備份即將覆蓋的程式檔。
+4. 把本包內容複製到 /data/VisionEdge，覆蓋同名程式，合併 static。
+   保留原有其他檔案及資料夾，不要整個刪除 static 或專案。
+5. 使用原本方式啟動 VisionEdge，瀏覽器 Ctrl+F5。
+6. 設備設定 → 錄影與儲存空間：建議先用 1080p、15 FPS、2.5 Mbps、
+   5 或 10 分鐘分檔，保留 10 GB；現有設定會保留，請確認並儲存。
+   儲存套用可能重啟取像，請在停止作業時執行。
+7. 啟動相機與檢測，選含標記錄影；狀態應顯示 GStreamer/v4l2h264enc。
+   先驗證一個分檔週期，下載播放並確認檢測速度，再做長時間驗收。
+
+本機未具備這台設備，故 appsrc→硬體→MP4 完整現場測試尚待步驟 2 確認。
+使用者已提供單獨 BGR→NV12→硬體 H.264→fakesink 正常 EOS 的結果，
+但這不代表相機、檢測與第二個編碼 session 同時運作一定有足夠資源。
+若並行時資源不足，本版會回報錄影失敗，沒有擅自改動既有 QTI 相機管線。
+碼率是目標值；檔案大小以實測為準，全天穩定性仍需實機 12/24 小時驗收。
+
+檔案：
+覆蓋 edge_runtime.py、visionedge_server.py、static/edge_dashboard.html、static/visionedge_i18n.js。
+新增或更新 long_recording.py、gst_record_worker.py、check_recording_env.py 及本包說明文件。
+不含 config、db、uploads、runtime_data、憑證私鑰或 __pycache__。
+回復時先停止服務，再還原上述程式備份。既有影片不需刪除。

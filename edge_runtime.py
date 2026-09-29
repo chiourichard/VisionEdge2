@@ -118,9 +118,11 @@ class EdgeConfig:
     infer_fps: float = 5.0
     preview_quality: int = 80
     snapshot_quality: int = 92
-    # 0 = automatic by resolution (8 Mbps at 1080p, 16 Mbps at 4K).
+    # 0 = annotated/PC 2.5 Mbps; QTI raw 8 Mbps at 1080p / 16 Mbps at 4K.
     recording_bitrate: int = 0
-    recording_fps: float = 30.0
+    recording_fps: float = 15.0
+    recording_max_height: int = 1080
+    recording_segment_seconds: int = 600
     record_source: str = 'raw'          # raw | result; QTI HW recorder is raw
     min_free_mb: int = 10240
     reconnect_sec: float = 2.0
@@ -151,6 +153,8 @@ class EdgeConfig:
         cfg.snapshot_quality = _safe_int(sec.get('snapshot_quality', cfg.snapshot_quality), cfg.snapshot_quality, 50, 100)
         cfg.recording_bitrate = _safe_int(sec.get('recording_bitrate', cfg.recording_bitrate), cfg.recording_bitrate, 0)
         cfg.recording_fps = _safe_float(sec.get('recording_fps', cfg.recording_fps), cfg.recording_fps, 1.0, 120.0)
+        cfg.recording_max_height = _safe_int(sec.get('recording_max_height', cfg.recording_max_height), 1080, 240, 2160)
+        cfg.recording_segment_seconds = _safe_int(sec.get('recording_segment_seconds', cfg.recording_segment_seconds), 600, 60, 1800)
         cfg.record_source = str(sec.get('record_source', cfg.record_source)).strip().lower()
         cfg.record_source = cfg.record_source if cfg.record_source in ('raw', 'result') else 'raw'
         cfg.min_free_mb = _safe_int(sec.get('min_free_mb', cfg.min_free_mb), cfg.min_free_mb, 0)
@@ -205,6 +209,8 @@ class EdgeConfig:
             ('preview_quality', self.preview_quality, 30, 100),
             ('snapshot_quality', self.snapshot_quality, 50, 100),
             ('recording_bitrate', self.recording_bitrate, 0, 100_000_000),
+            ('recording_max_height', self.recording_max_height, 240, 2160),
+            ('recording_segment_seconds', self.recording_segment_seconds, 60, 1800),
             ('min_free_mb', self.min_free_mb, 0, None),
         ):
             if key in data:
@@ -840,90 +846,7 @@ class QtiGstCameraBackend(CameraBackend):
         return out
 
 
-class SoftwareRecorder:
-    def __init__(self, cfg: EdgeConfig):
-        self.cfg = cfg
-        self.writer = None
-        self.path: Optional[Path] = None
-        self.frames = 0
-        self.started_at = None
-        self.mode = 'raw'
-        self.size: Optional[Tuple[int, int]] = None
-        self.fps: float = 0.0
-        self.lock = threading.RLock()
-
-    def start(self, frame: np.ndarray, path: Path, mode: str, fps: Optional[float] = None) -> Tuple[bool, str]:
-        with self.lock:
-            if self.writer is not None:
-                return False, 'recording already active'
-            h, w = frame.shape[:2]
-            path.parent.mkdir(parents=True, exist_ok=True)
-            target_fps = float(fps or 0.0)
-            if not (1.0 <= target_fps <= 120.0):
-                target_fps = float(self.cfg.recording_fps)
-            writer = cv2.VideoWriter(
-                str(path), cv2.VideoWriter_fourcc(*'mp4v'),
-                target_fps, (w, h),
-            )
-            if not writer.isOpened():
-                writer.release()
-                path = path.with_suffix('.avi')
-                writer = cv2.VideoWriter(
-                    str(path), cv2.VideoWriter_fourcc(*'MJPG'),
-                    target_fps, (w, h),
-                )
-            if not writer.isOpened():
-                writer.release()
-                return False, 'OpenCV VideoWriter cannot open mp4v or MJPG encoder'
-            self.writer = writer
-            self.path = path
-            self.frames = 0
-            self.started_at = time.time()
-            self.mode = mode
-            self.size = (w, h)
-            self.fps = target_fps
-            return True, str(path)
-
-    def write(self, raw: np.ndarray, result: Optional[np.ndarray]) -> None:
-        with self.lock:
-            if self.writer is None:
-                return
-            frame = result if self.mode == 'result' and result is not None else raw
-            try:
-                if self.size is not None and (frame.shape[1], frame.shape[0]) != self.size:
-                    frame = cv2.resize(frame, self.size, interpolation=cv2.INTER_AREA)
-                self.writer.write(frame)
-                self.frames += 1
-            except Exception:
-                pass
-
-    def stop(self) -> Dict[str, Any]:
-        with self.lock:
-            writer, path = self.writer, self.path
-            if writer is None:
-                return {'success': False, 'error': 'not recording'}
-            # Keep active/path visible until the container has finalized.
-            writer.release()
-            frames = self.frames
-            started = self.started_at
-            self.writer = None
-            self.path = None
-            self.frames = 0
-            self.started_at = None
-            fps = self.fps
-            self.size = None
-            self.fps = 0.0
-        return {
-            'success': True,
-            'path': str(path) if path else '',
-            'frames': frames,
-            'duration_sec': round(time.time() - started, 2) if started else 0,
-            'fps': round(fps, 2),
-        }
-
-    @property
-    def active(self) -> bool:
-        return self.writer is not None
+from long_recording import H264Recorder as SoftwareRecorder
 
 
 def serialized_control(fn):
@@ -953,6 +876,7 @@ class EdgeRuntime:
         self._definition_request = None
         self.backend: Optional[CameraBackend] = None
         self.soft_rec = SoftwareRecorder(self.cfg)
+        self._recorder_state = None
         self.cache_mgr = None
         self.engine = None
         self.packaging = None
@@ -1445,7 +1369,14 @@ class EdgeRuntime:
                 if self.definition_pending and self.soft_rec.active and self.soft_rec.mode == 'result':
                     self.soft_rec.stop()
                     self._bump_media_version()
-                self.soft_rec.write(frame, result_frame)
+                if self.soft_rec.mode != 'result' or did_infer:
+                    self.soft_rec.write(frame, result_frame)
+                if self.soft_rec.error:
+                    self.last_warning = self.soft_rec.error
+                recorder_state = (self.soft_rec.active, self.soft_rec.segment_count, self.soft_rec.error)
+                if recorder_state != self._recorder_state:
+                    self._recorder_state = recorder_state
+                    self._bump_media_version()
                 backend_status = backend.status()
                 if (self.soft_rec.active or backend_status.get('recording')) and now - self._last_storage_check >= 2.0:
                     self._last_storage_check = now
@@ -1542,7 +1473,7 @@ class EdgeRuntime:
                 'running': running,
                 'status': self.status_text,
                 'error': self.last_error,
-                'warning': self.last_warning,
+                'warning': self.last_warning or self.soft_rec.error,
                 'backend_requested': self.cfg.backend,
                 'backend': self.actual_backend or backend_status.get('backend', ''),
                 'backend_status': backend_status,
@@ -1567,6 +1498,8 @@ class EdgeRuntime:
                 'has_raw': bool(self.latest_raw_jpeg) and fresh,
                 'has_result': bool(self.latest_result_jpeg) and result_fresh and not self.definition_pending,
                 **storage,
+                **(self.soft_rec.status(storage.get('storage_free_mb'), storage.get('storage_reserve_mb', 0))
+                   if not backend_status.get('recording') else {'recording_encoder': 'QTI H.264', 'recording_segments': 1}),
             }
 
     def jpeg(self, mode: str = 'result') -> bytes:
@@ -1635,26 +1568,27 @@ class EdgeRuntime:
             ok, msg = backend.start_recording(path)
             if ok:
                 self.recording_started_at = time.time()
+                self.soft_rec.error = ''
+                self.last_warning = ''
             version = self._bump_media_version() if ok else self.media_version
             return {'success': ok, 'path': f'recordings/{path.name}' if ok else '', 'mode': mode, 'hardware': True, 'error': '' if ok else msg, 'media_version': version}
         if frame is None:
             return {'success': False, 'error': 'no frame available'}
-        # Software overlay recording must use the measured received-frame rate,
-        # not the sensor target rate. Otherwise a ~24 FPS appsink stream written
-        # into a 30 FPS container plays back too fast.
-        measured_fps = float(self.source_fps or 0.0)
-        if not (1.0 <= measured_fps <= 120.0):
-            measured_fps = float(self.cfg.recording_fps)
-        ok, actual = self.soft_rec.start(frame, path, mode, fps=measured_fps)
+        # The independent recorder schedules frames at configured output FPS.
+        # Camera/inference rates no longer determine the container time base.
+        ok, actual = self.soft_rec.start(frame, path, mode)
         if ok:
-            self.recording_started_at = time.time()
+            self.recording_started_at = self.soft_rec.started_at
+            self.last_warning = ''
         actual_path = Path(actual) if ok else None
         version = self._bump_media_version() if ok else self.media_version
         return {
             'success': ok,
             'path': f'recordings/{actual_path.name}' if actual_path else '',
             'mode': mode,
-            'hardware': False,
+            'hardware': self.soft_rec.encoder == 'GStreamer/v4l2h264enc',
+            'encoder': self.soft_rec.encoder,
+            'segment_seconds': self.cfg.recording_segment_seconds,
             'error': '' if ok else actual,
             'media_version': version,
         }
@@ -1718,7 +1652,7 @@ class EdgeRuntime:
             if not root.exists():
                 return out
             for p in sorted(root.iterdir(), key=lambda x: x.stat().st_mtime if x.exists() else 0, reverse=True):
-                if not p.is_file():
+                if not p.is_file() or p.suffix == '.csv':
                     continue
                 try:
                     st = p.stat()
@@ -1727,7 +1661,8 @@ class EdgeRuntime:
                 out.append({
                     'path': f'{prefix}/{p.name}', 'name': p.name,
                     'size': st.st_size, 'mtime': st.st_mtime,
-                    'active': bool(active_resolved and str(p.resolve()) == active_resolved),
+                    'active': (self.soft_rec.active and self.soft_rec.owns_active(p)) or bool(active_resolved and str(p.resolve()) == active_resolved),
+                    'incomplete': p.name.endswith('.mp4.part'),
                     'kind': 'photo' if prefix == 'photos' else 'recording',
                 })
             return out
@@ -1753,7 +1688,7 @@ class EdgeRuntime:
             )
         if active and active_path:
             try:
-                if path.resolve() == Path(active_path).resolve():
+                if path.resolve() == Path(active_path).resolve() or self.soft_rec.owns_active(path):
                     return {
                         'success': False,
                         'error': 'cannot delete the file that is currently being recorded',

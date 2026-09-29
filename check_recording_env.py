@@ -1,0 +1,110 @@
+"""Check the same encoder worker used by recording, without opening a camera."""
+import csv
+from pathlib import Path
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+
+
+def mp4_complete(path):
+    boxes = set()
+    with path.open('rb') as stream:
+        length = path.stat().st_size
+        while stream.tell() + 8 <= length:
+            start = stream.tell()
+            size, name = struct.unpack('>I4s', stream.read(8))
+            header = 8
+            if size == 1:
+                size = struct.unpack('>Q', stream.read(8))[0]
+                header = 16
+            if size == 0:
+                size = length - start
+            if size < header or start + size > length:
+                return False
+            boxes.add(name)
+            stream.seek(start + size)
+    return {b'moov', b'mdat'} <= boxes
+
+
+def main():
+    use_gst = sys.platform.startswith('linux') and bool(shutil.which('gst-inspect-1.0'))
+    ffmpeg = shutil.which('ffmpeg')
+    if not use_gst and not ffmpeg:
+        print('FAIL: Neither the OELinux GStreamer path nor FFmpeg is available in this environment.')
+        return 1
+    with tempfile.TemporaryDirectory(prefix='visionedge-record-check-') as temporary:
+        root = Path(temporary)
+        pattern, manifest = root/'check_%06d.mp4.part', root/'closed.csv'
+        if use_gst:
+            worker = Path(__file__).with_name('gst_record_worker.py')
+            if not worker.exists():
+                print('FAIL: Extract gst_record_worker.py beside this script.')
+                return 1
+            command = [sys.executable, '-u', str(worker), '--width', '640', '--height', '360',
+                       '--fps', '15', '--bitrate', '2500000', '--segment', '1',
+                       '--pattern', str(pattern), '--manifest', str(manifest)]
+            print('Testing GStreamer appsrc -> BGR/NV12 -> v4l2h264enc -> splitmuxsink/mp4mux')
+        else:
+            command = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-filter_threads', '1',
+                       '-f', 'rawvideo', '-pixel_format', 'bgr24', '-video_size', '640x360', '-framerate', '15',
+                       '-i', 'pipe:0', '-map', '0:v:0', '-an', '-c:v', 'libx264', '-preset', 'veryfast',
+                       '-tune', 'zerolatency', '-threads', '2', '-pix_fmt', 'yuv420p', '-b:v', '2500000',
+                       '-maxrate', '2500000', '-bufsize', '5000000', '-g', '15', '-sc_threshold', '0',
+                       '-force_key_frames', 'expr:gte(t,n_forced*1)', '-f', 'segment', '-segment_format', 'mp4',
+                       '-segment_time', '1', '-reset_timestamps', '1', '-segment_list', str(manifest),
+                       '-segment_list_type', 'csv', str(pattern)]
+            print('Testing FFmpeg/libx264:', ffmpeg)
+        # Bounded memory; no camera, installation, service restart or network.
+        errors = []
+        with tempfile.TemporaryFile() as log:
+            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                       stderr=log, bufsize=0,
+                                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            def feed():
+                try:
+                    frame = bytes((32, 128, 224)) * (640 * 360)
+                    for _ in range(60):
+                        data = memoryview(frame)
+                        while data:
+                            count = process.stdin.write(data)
+                            if not count:
+                                raise RuntimeError('Encoder stopped accepting frames')
+                            data = data[count:]
+                except Exception as exc:
+                    errors.append(str(exc))
+                finally:
+                    process.stdin.close()
+            writer = threading.Thread(target=feed, daemon=True)
+            writer.start()
+            try:
+                code = process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                code = process.wait(timeout=5)
+                errors.append('Encoder check timed out')
+            writer.join(timeout=2)
+            log.seek(0)
+            diagnostic = log.read().decode('utf-8', 'replace')
+        clips = list(root.glob('*.mp4.part'))
+        rows = list(csv.reader(manifest.open(encoding='utf-8', newline=''))) if manifest.exists() else []
+        if code or errors or len(clips) < 2 or len(rows) != len(clips) or not all(mp4_complete(p) for p in clips):
+            print('FAIL: H.264 encoding / confirmed MP4 segmentation did not complete.')
+            print('Files:', len(clips), 'Closed fragments:', len(rows), 'Exit:', code)
+            print('\n'.join(errors))
+            print(diagnostic[-8000:])
+            return 1
+        print(f'PASS: H.264 encoding and {len(clips)} closed MP4 fragments verified.')
+        print('No FFmpeg required for the OELinux GStreamer path.' if use_gst else 'Portable FFmpeg path verified.')
+        print('Camera coexistence, 1080p load and 12/24-hour stability still require on-device testing.')
+        return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        print('FAIL:', exc)
+        sys.exit(1)

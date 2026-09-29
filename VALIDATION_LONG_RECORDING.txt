@@ -1,0 +1,7 @@
+OELinux revision 2:
+User device evidence: BGR/NV12/v4l2h264enc/h264parse/fakesink reached EOS.
+Host protocol tests: packed/stride-aligned BGR, PTS, bounded appsrc, codec controls,
+fragment-closed CSV publication, bus errors and Linux selection without FFmpeg.
+Host portable regression: H.264 segmentation/playback/time/config/error checks and recording API passed.
+No on-device appsrc/MP4 fragmentation, concurrent-camera or 24-hour claim is made.
+Run the included NEW check_recording_env.py on the actual camera before applying.

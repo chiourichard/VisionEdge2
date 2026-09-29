@@ -241,6 +241,8 @@ def edge_media_file(rel):
         return jsonify({'error': str(exc)}), 400
     if not path.exists() or not path.is_file():
         return jsonify({'error': 'not found'}), 404
+    if path.name.endswith('.mp4.part') or path.suffix == '.csv':
+        return jsonify({'error': '錄影尚未完成或檔案不完整，不能開啟或下載'}), 409
     status = EDGE.status()
     if status['recording'] and status.get('record_path') and Path(status['record_path']).resolve() == path.resolve():
         return jsonify({'error': '錄影尚未完成，請先停止錄影'}), 409
